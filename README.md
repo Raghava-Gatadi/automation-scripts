@@ -3,6 +3,41 @@
 Small Python utilities using only the standard library. Requires Python 3.9+;
 the secrets scanner also requires Git on your PATH.
 
+## Dependency quick check (day 3)
+
+`dependency_quickcheck.py` sends exact package versions from `requirements.txt`
+and `package.json` to the [OSV API](https://google.github.io/osv.dev/post-v1-querybatch/)
+and prints advisory IDs with links. It uses only the Python standard library.
+
+```sh
+python3 dependency_quickcheck.py                   # manifests in this directory
+python3 dependency_quickcheck.py /path/to/project
+python3 dependency_quickcheck.py requirements.txt frontend/package.json
+python3 dependency_quickcheck.py /path/to/project --json dependency-report.json
+```
+
+- Checks Python `name==version` pins (including extras and hash annotations),
+  plus exact npm versions in dependencies, devDependencies and optionalDependencies.
+  Python environment markers are not evaluated: every supported declared pin is
+  checked, even if its marker would exclude it on the current machine.
+- Lists unsupported entries as skipped. It does not guess versions for ranges
+  such as `>=1.0` or `^1.2.3`, resolve tags/aliases, follow requirements includes,
+  or install dependencies. Peer requirements and workspaces are flagged for
+  follow-up; pass each workspace's manifest explicitly. No lockfile or transitive
+  dependency analysis is performed.
+- Queries unique ecosystem/name/version combinations in batches and follows OSV
+  pagination. Multiple advisory records can describe the same underlying issue.
+  Links provide details; the script does not calculate severity or choose upgrades.
+- Sends package names and versions to OSV, including private package names if
+  declared with supported pins. It does not send entire manifests or index URLs.
+- Exit **0**: all supported declarations checked with no matching advisories;
+  **1**: advisories found; **2**: skipped entries, invalid input, network/API errors,
+  or report-write failure. Exit 2 takes precedence over discovered advisories.
+  An empty manifest has zero packages to check; no matching advisory is not proof
+  that a dependency is safe.
+
+Tests are deferred until this script is combined with the next supplied version.
+
 ## Git repository secrets scanner
 
 `git_secrets_scan.py` scans tracked working-tree files for private keys, common
