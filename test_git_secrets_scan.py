@@ -19,6 +19,8 @@ class ScannerTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         self.git("init", "-q")
+        self.git("config", "user.name", "Scanner Test")
+        self.git("config", "user.email", "scanner-test@example.invalid")
         self.secret = "ghp_" + "Ab9x" * 9
 
     def git(self, *args):
@@ -140,10 +142,10 @@ class ScannerTests(unittest.TestCase):
     def test_entropy_and_assignment_rules(self):
         high = "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0iL"
         low = "a1" * 30
-        values = scanner.detect("test", high + "\n" + low, 4.5)
+        values = scanner.detect("test", '"' + high + '"\n"' + low + '"', 4.5)
         self.assertEqual([f["rule"] for f in values], ["entropy-token"])
         hex_value = "0123456789abcdef" * 4
-        self.assertEqual(scanner.detect("test", hex_value, 4.5)[0]["rule"], "entropy-hex")
+        self.assertEqual(scanner.detect("test", 'key material: "' + hex_value + '"', 4.5)[0]["rule"], "entropy-hex")
         assignment = "password" + ' = "' + "ordinary-value" + '"'
         self.assertEqual(scanner.detect("test", assignment, 4.5)[0]["rule"], "secret-assignment")
         self.assertEqual(scanner.entropy("aaaa"), 0)
@@ -160,6 +162,165 @@ class ScannerTests(unittest.TestCase):
         for rule, value in examples.items():
             with self.subTest(rule=rule):
                 self.assertIn(rule, [f["rule"] for f in scanner.detect("test", value, 4.5)])
+
+    def test_added_rules_and_severities(self):
+        examples = {
+            "aws-secret-key": "AWS_SECRET_ACCESS_KEY" + ' = "' + "Ab9/" * 10 + '"',
+            "slack-webhook": "https://hooks.slack.com/" + "services/T123/B456/abcdef123",
+            "jwt": "eyJ" + "a" * 12 + ".eyJ" + "b" * 12 + "." + "c" * 12,
+            "private-key": "-----BEGIN PGP " + "PRIVATE KEY BLOCK-----\nbody\n-----END PGP " + "PRIVATE KEY BLOCK-----",
+        }
+        for rule, value in examples.items():
+            with self.subTest(rule=rule):
+                results = scanner.detect("test", value, 4.5)
+                self.assertEqual([f["rule"] for f in results], [rule])
+                self.assertIn(results[0]["severity"], scanner.SEVERITY_ORDER)
+
+    def test_contextual_entropy_and_no_entropy(self):
+        value = "Ab3De6Gh9Jk2Mn5Pq8St1Vw4Yz7Cf0Il"
+        self.assertEqual(scanner.detect("test", value, 4.5), [])
+        self.assertEqual(len(scanner.detect("test", value, 4.5, entropy_mode="all")), 1)
+        self.assertEqual(len(scanner.detect("test", "VALUE=" + value, 4.5)), 1)
+        hex_value = "0123456789abcdef" * 4
+        self.assertEqual(scanner.detect("test", 'checksum = "' + hex_value + '"', 4.5), [])
+        uuid = "01234567-89ab-cdef-0123-456789abcdef"
+        self.assertEqual(scanner.detect("test", 'id = "' + uuid + '"', 1.0), [])
+        self.write("data.txt", 'value = "' + value + '"')
+        self.run_scan(expected=1)
+        self.run_scan("--no-entropy")
+        self.write("config.txt", self.secret)
+        self.run_scan("--no-entropy", expected=1)
+
+    def test_exact_placeholders_do_not_hide_real_secrets(self):
+        prefix = "password" + ' = "'
+        for value in ("changeme", "your_password", "${MY_PASSWORD}", "{{MY_PASSWORD}}", "<PASSWORD>"):
+            self.assertEqual(scanner.detect("test", prefix + value + '"', 4.5), [])
+        for value in ("my-example-real-secret", "your-real-password-123", "StrongPassword123"):
+            self.assertTrue(scanner.detect("test", prefix + value + '"', 4.5))
+        # Provider patterns are never suppressed by placeholder substrings.
+        self.assertTrue(scanner.detect("test", "ghp_" + "example" + "A" * 29, 4.5))
+
+    def test_allowlist_is_opt_in_and_counted(self):
+        self.write("config.txt", self.secret + " # pragma: allowlist secret")
+        self.run_scan(expected=1)
+        self.run_scan("--honor-allowlist", "--json", "report.json")
+        report = json.loads((self.root / "report.json").read_text())
+        self.assertEqual(report["inline_allowlisted_count"], 1)
+        self.assertEqual(report["new_findings"], [])
+        self.write("config.txt", self.secret + " nosecret")
+        self.run_scan("--honor-allowlist", expected=1)
+
+    def test_long_lines_and_explicit_exclusions(self):
+        self.write("vendor/fixture.txt", " " * 3000 + self.secret)
+        self.run_scan(expected=1)
+        self.run_scan("--exclude", "vendor/*", "--json", "report.json")
+        report = json.loads((self.root / "report.json").read_text())
+        self.assertEqual(report["skipped"], [{"path": "vendor/fixture.txt", "reason": "excluded"}])
+
+    def test_history_deleted_secret_and_odd_path(self):
+        path = self.write("odd\tname\n.txt", "clean\n" + self.secret)
+        self.git("commit", "-qm", "Add synthetic fixture")
+        commit = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        self.git("rm", "--", path.name)
+        self.git("commit", "-qm", "Remove fixture")
+        self.run_scan()
+        self.run_scan("--history", "--json", "report.json", expected=1)
+        report = json.loads((self.root / "report.json").read_text())
+        self.assertNotIn(self.secret, json.dumps(report))
+        finding = report["new_findings"][0]
+        self.assertEqual((finding["path"], finding["line"], finding["commit"]), (path.name, 2, commit))
+        self.assertEqual(finding["where"], "history")
+        self.run_scan("--history", "--update-baseline")
+        self.run_scan("--history")
+
+    def test_history_unborn_repository(self):
+        self.run_scan("--history")
+
+    def test_history_includes_detached_head(self):
+        self.write("readme", "hello")
+        self.git("commit", "-qm", "Initial")
+        self.git("checkout", "--detach")
+        path = self.write("config.txt", self.secret)
+        self.git("commit", "-qm", "Detached fixture")
+        path.write_text("clean")
+        self.run_scan("--history", expected=1)
+
+    def test_shallow_history_is_reported(self):
+        self.write("readme", "hello")
+        self.git("commit", "-qm", "Initial")
+        commit = self.git("rev-parse", "HEAD").stdout
+        (self.root / ".git" / "shallow").write_bytes(commit)
+        result = self.run_scan("--history", "--json", "report.json")
+        self.assertIn("shallow clone", result.stderr)
+        self.assertTrue(json.loads((self.root / "report.json").read_text())["history_shallow"])
+
+    def test_history_exclusions_and_size_limits_are_reported(self):
+        self.write("vendor/config.txt", self.secret)
+        self.git("commit", "-qm", "Fixture")
+        self.git("rm", "vendor/config.txt")
+        self.git("commit", "-qm", "Remove fixture")
+        self.run_scan("--history", "--exclude", "vendor/*", "--json", "report.json")
+        report = json.loads((self.root / "report.json").read_text())
+        self.assertEqual(report["skipped"][0]["reason"], "excluded")
+        self.assertIn("commit", report["skipped"][0])
+        self.run_scan("--history", "--max-bytes", "10", "--json", "report.json")
+        report = json.loads((self.root / "report.json").read_text())
+        self.assertEqual(report["skipped"][0]["reason"], "size limit")
+
+    def test_history_deduplicates_versions_and_current_findings(self):
+        self.write("config.txt", self.secret)
+        self.git("commit", "-qm", "Add fixture")
+        self.write("readme", "hello")
+        self.git("commit", "-qm", "Keep fixture unchanged")
+        self.run_scan("--history", "--json", "report.json", expected=1)
+        report = json.loads((self.root / "report.json").read_text())
+        self.assertEqual(len(report["new_findings"]), 1)
+        self.assertEqual(report["new_findings"][0]["where"], "working-tree")
+        self.assertEqual(report["history_versions_scanned"], 2)
+
+    def test_current_allowlist_does_not_hide_historical_secret(self):
+        path = self.write("config.txt", self.secret)
+        self.git("commit", "-qm", "Add fixture")
+        path.write_text(self.secret + " # nosecret")
+        self.run_scan("--honor-allowlist")
+        self.run_scan("--history", "--honor-allowlist", "--json", "report.json", expected=1)
+        report = json.loads((self.root / "report.json").read_text())
+        self.assertEqual(report["new_findings"][0]["where"], "history")
+
+    def test_history_captures_merge_only_key_and_other_refs(self):
+        self.write("readme", "hello")
+        self.git("commit", "-qm", "Initial")
+        base = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        self.git("checkout", "-qb", "side")
+        self.write("side.txt", "hello side")
+        self.git("commit", "-qm", "Side")
+        self.git("checkout", "-qb", "main-test", base)
+        self.write("main.txt", "hello main")
+        self.git("commit", "-qm", "Main")
+        self.git("merge", "--no-ff", "--no-commit", "side")
+        key = "-----BEGIN " + "PRIVATE KEY-----\nsynthetic-body\n-----END " + "PRIVATE KEY-----"
+        self.write("merge-key.txt", key)
+        self.git("commit", "-qm", "Merge with fixture")
+        self.git("checkout", "--detach", base)
+        self.run_scan("--history", "--json", "report.json", expected=1)
+        report = json.loads((self.root / "report.json").read_text())
+        self.assertEqual([f["rule"] for f in report["new_findings"]], ["private-key"])
+
+    def test_stale_baseline_reporting_and_update_alias(self):
+        path = self.write("config.txt", self.secret)
+        self.run_scan("--update-baseline")
+        path.write_text("clean")
+        self.run_scan("--json", "report.json")
+        report = json.loads((self.root / "report.json").read_text())
+        self.assertEqual(report["stale_baseline_count"], 1)
+        self.run_scan("--update-baseline")
+        self.assertEqual(json.loads((self.root / scanner.DEFAULT_BASELINE).read_text())["findings"], [])
+
+    def test_history_git_failure_is_an_error(self):
+        from unittest.mock import patch
+        with patch.object(scanner, "git", side_effect=scanner.ScanError("Git command failed: rev-list")):
+            with self.assertRaises(scanner.ScanError):
+                scanner.scan_history(self.root, set(), 1048576, 4.5)
 
 
 if __name__ == "__main__":
