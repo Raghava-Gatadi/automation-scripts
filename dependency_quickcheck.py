@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""First-pass OSV checks for exact versions in requirements.txt and package.json.
+"""First-pass OSV checks for requirements.txt, package.json and package-lock.json.
 
 Uses the standard library. Sends package names, ecosystems and versions to OSV;
 does not install packages. Exit: 0 no advisories, 1 advisories, 2 incomplete/error.
@@ -17,7 +17,7 @@ import urllib.request
 
 
 API = "https://api.osv.dev/v1/querybatch"
-MANIFESTS = ("requirements.txt", "package.json")
+MANIFESTS = ("requirements.txt", "package-lock.json", "package.json")
 PYTHON_PIN = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9_,. -]+\])?\s*==\s*([^\s;]+)")
 PYTHON_VERSION = re.compile(
     r"v?(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc)[0-9]+)?"
@@ -85,19 +85,48 @@ def read_package_json(path, add, skip):
         skip(f"{path}:workspaces", "Workspace manifests are not discovered automatically; pass their files explicitly")
 
 
+def read_package_lock(path, add, skip):
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict) or data.get("lockfileVersion") not in (2, 3) or not isinstance(data.get("packages"), dict):
+        raise ValueError("Expected a v2/v3 lockfile with a packages object")
+    for key, info in data["packages"].items():
+        if not isinstance(info, dict):
+            raise ValueError("Invalid lockfile package entry")
+        if not key:  # Root project is not a dependency.
+            continue
+        location = f"{path}:packages:{key}"
+        resolved = info.get("resolved", "")
+        if not isinstance(resolved, str):
+            raise ValueError("Invalid lockfile source")
+        if (info.get("link") or "node_modules/" not in key or
+                resolved.startswith(("git+", "git:", "file:", "./", "../", "/")) or ".git#" in resolved):
+            skip(location, "Local/workspace link or Git dependency is not resolved as a registry package")
+            continue
+        # Use the real name when recorded (e.g. registry aliases); otherwise take
+        # the final node_modules path segment, preserving scoped package names.
+        name = info.get("name", key.rsplit("node_modules/", 1)[-1])
+        version = info.get("version", "")
+        if isinstance(name, str) and NPM_NAME.fullmatch(name) and isinstance(version, str) and NPM_VERSION.fullmatch(version):
+            add("npm", name, version, location)
+        else:
+            skip(location, "Missing or unsupported locked registry package name/version")
+
+
 def discover(inputs):
     files = []
     for value in inputs:
         path = Path(value)
         if path.is_dir():
             found = [path / name for name in MANIFESTS if (path / name).is_file()]
+            if path / "package-lock.json" in found:
+                found = [file for file in found if file.name != "package.json"]
             if not found:
-                raise ValueError("Directory has no requirements.txt or package.json")
+                raise ValueError("Directory has no supported manifests")
             files.extend(found)
         elif path.is_file() and path.name in MANIFESTS:
             files.append(path)
         else:
-            raise ValueError("Input must be a directory, requirements.txt or package.json")
+            raise ValueError("Input must be a directory or supported manifest")
     return list(dict.fromkeys(path.resolve() for path in files))
 
 
@@ -131,6 +160,8 @@ def query_osv(packages, timeout):
                         raise ValueError("Unexpected OSV advisory")
                     matches[index].add(vuln["id"])
                 next_page = result.get("next_page_token")
+                if next_page is not None and not isinstance(next_page, str):
+                    raise ValueError("Invalid OSV pagination token")
                 if next_page:
                     if not isinstance(next_page, str) or (index, next_page) in tokens:
                         raise ValueError("Invalid or repeated OSV pagination token")
@@ -164,10 +195,11 @@ def main(argv=None):
     try:
         files = discover(args.paths or ["."])
         report_path = Path(args.json).resolve() if args.json else None
-        if report_path and report_path in {*files, Path(__file__).resolve()}:
+        if report_path and (report_path.name in MANIFESTS or report_path in {*files, Path(__file__).resolve()}):
             raise ValueError("Report must not overwrite a manifest or the script")
         for path in files:
-            reader = read_requirements if path.name == "requirements.txt" else read_package_json
+            reader = {"requirements.txt": read_requirements, "package.json": read_package_json,
+                      "package-lock.json": read_package_lock}[path.name]
             reader(path, add, skip)
     except (OSError, ValueError, UnicodeError):
         print("Error: missing/invalid manifest or report path. No OSV queries sent.", file=sys.stderr)
@@ -175,7 +207,9 @@ def main(argv=None):
 
     packages = list(packages.values())
     report = {"generated": dt.datetime.now(dt.timezone.utc).isoformat(), "complete": False,
+              "manifests": [str(path) for path in files],
               "packages_checked": 0, "results": [], "skipped": skipped}
+    print("Inputs: " + ", ".join(json.dumps(str(path)) for path in files))
     error = False
     try:
         advisory_ids = query_osv(packages, args.timeout)
