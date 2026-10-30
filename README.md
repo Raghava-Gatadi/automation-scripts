@@ -3,6 +3,38 @@
 Small Python utilities using only the standard library. Requires Python 3.9+;
 the secrets scanner also requires Git on your PATH.
 
+## Dangling CNAME quick check (day 4)
+
+`subdomain_quickcheck.py` follows CNAME chains for supplied hostnames and flags
+missing targets for manual review. Uses Python's standard library and
+[Google Public DNS's JSON API](https://developers.google.com/speed/public-dns/docs/doh/json).
+
+```sh
+python3 subdomain_quickcheck.py app.example.com docs.example.com
+python3 subdomain_quickcheck.py -f subdomains.txt --json cname-report.json
+```
+
+- Accepts hostnames or a file with one per line, deduplicates inputs, and follows
+  up to ten CNAME links. No enumeration or HTTP probing is performed.
+- `DANGLING`: an observed CNAME chain ends in NXDOMAIN. `NO_ADDRESS`: the target
+  exists but has neither A nor AAAA data; check its intended use. Both are review
+  candidates, not proof a resource can be claimed.
+- `RESOLVES`: an address was found. This does not rule out an unclaimed hosted
+  service. `NO_CNAME` and `NOT_FOUND` describe the input hostname, without implying
+  a takeover finding. A nonexistent input alone is not a dangling CNAME.
+- `ERROR`: timeouts, DNS errors such as SERVFAIL/REFUSED, loops, changing answers,
+  invalid API responses, or a depth limit. These results are inconclusive.
+- A small Azure suffix list adds service-name context only. Provider protections
+  and resource claimability require separate review; see
+  [Microsoft's dangling DNS guidance](https://learn.microsoft.com/en-us/azure/security/fundamentals/subdomain-takeover).
+- Queries go to Google Public DNS; only check names you are authorized to assess.
+  Internal/split DNS may look different from this public resolver. This is a
+  single cached DNS view; confirm findings against authoritative DNS before acting.
+  The timeout is per request, not for the whole run. No accounts or resources are
+  created, and the script does not attempt to claim targets.
+- Exit **0**: no DNS candidates observed; **1**: candidates to review; **2**:
+  invalid input, inconclusive lookup, or report error. Exit 2 takes precedence.
+
 ## Dependency quick check (day 3)
 
 `dependency_quickcheck.py` sends exact package versions from `requirements.txt`,
