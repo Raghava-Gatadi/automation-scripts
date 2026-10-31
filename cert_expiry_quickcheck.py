@@ -54,11 +54,18 @@ def check(endpoint, days, timeout):
                 cert = connection.getpeercert()
         expires = ssl.cert_time_to_seconds(cert["notAfter"])
         remaining = expires - dt.datetime.now(dt.timezone.utc).timestamp()
-        result["status"] = "EXPIRED" if remaining <= 0 else "EXPIRING" if remaining <= days * 86400 else "OK"
+        result["status"] = ("EXPIRED" if remaining <= 0 else "CRITICAL" if remaining <= 7 * 86400
+                            else "WARNING" if remaining <= days * 86400 else "OK")
         expiry = dt.datetime.fromtimestamp(expires, dt.timezone.utc).isoformat()
+        result.update(days_left=remaining / 86400, expires_at=expiry)
         result["detail"] = f"expires {expiry}; {remaining / 86400:.1f} days remaining"
-    except ssl.SSLCertVerificationError:
-        result.update(status="INVALID_CERT", detail="Certificate/hostname verification failed (may be expired, untrusted or mismatched)")
+    except ssl.SSLCertVerificationError as error:
+        # OpenSSL X509_V_ERR_CERT_HAS_EXPIRED is 10. It may refer to an
+        # intermediate certificate; do not invent a leaf expiry date.
+        if getattr(error, "verify_code", None) == 10:
+            result.update(status="EXPIRED", detail="TLS verifier reports an expired certificate in the chain; expiry date unavailable")
+        else:
+            result.update(status="INVALID_CERT", detail="Certificate/hostname verification failed (untrusted, mismatched or otherwise invalid)")
     except (OSError, ValueError, KeyError, OverflowError):
         result["detail"] = "Connection/TLS failure or unavailable certificate expiry; check incomplete"
     return result
@@ -133,9 +140,9 @@ def send_email(config, text, timeout):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("hosts", nargs="*", help="Hostnames, host:port or HTTPS origins (default port 443)")
+    parser.add_argument("hosts", nargs="*", help="Hosts, HTTPS origins or existing target files (default port 443)")
     parser.add_argument("-f", "--file", help="UTF-8 target file; one target per line, # comments allowed")
-    parser.add_argument("--days", type=int, default=30, help="Alert window in days (default: 30)")
+    parser.add_argument("--days", type=int, default=30, help="Warning window (default: 30); critical is always <= 7 days")
     parser.add_argument("--timeout", type=float, default=8, help="Timeout per socket operation (default: 8 seconds)")
     parser.add_argument("--slack", action="store_true", help="Send issue summary using SLACK_WEBHOOK_URL")
     parser.add_argument("--email", action="store_true", help="Send issue summary using SMTP_* environment settings")
@@ -143,9 +150,16 @@ def main(argv=None):
     if args.days < 0 or not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("days must be nonnegative and timeout positive and finite")
     try:
-        values = list(args.hosts)
+        values, files = [], []
+        for value in args.hosts:
+            if Path(value).is_file():
+                files.append(Path(value))
+            else:
+                values.append(value)
         if args.file:
-            values.extend(line.split("#", 1)[0].strip() for line in Path(args.file).read_text(encoding="utf-8-sig").splitlines()
+            files.append(Path(args.file))
+        for path in files:
+            values.extend(line.split("#", 1)[0].strip() for line in path.read_text(encoding="utf-8-sig").splitlines()
                           if line.split("#", 1)[0].strip())
         if not values:
             parser.error("provide targets or --file")
@@ -156,13 +170,14 @@ def main(argv=None):
         return 2
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda endpoint: check(endpoint, args.days, args.timeout), targets))
+    results.sort(key=lambda item: (item.get("days_left") is not None, item.get("days_left", 0), item["target"]))
     for item in results:
         print(f'[{item["status"]}] {item["target"]}: {item["detail"]}')
     issues = [item for item in results if item["status"] != "OK"]
-    print(f"{len(results)} target(s); {len(issues)} need attention (warning window: {args.days} days).")
+    print(f"{len(results)} target(s); {len(issues)} need attention (warning: {args.days} days; critical: 7 days).")
     failed = any(item["status"] == "ERROR" for item in results)
     if issues:
-        lines = [f'TLS certificate quick check: {len(issues)}/{len(results)} need attention; window {args.days} days.']
+        lines = [f'TLS certificate quick check: {len(issues)}/{len(results)} need attention; warning {args.days} days, critical 7 days.']
         lines.extend(f'[{item["status"]}] {item["target"]}: {item["detail"]}' for item in issues)
         text = "\n".join(lines)
         for channel in config:

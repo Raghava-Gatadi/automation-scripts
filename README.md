@@ -12,17 +12,25 @@ one pass per invocation. No scheduler, saved state or alert deduplication.
 ```sh
 python3 cert_expiry_quickcheck.py example.com api.example.com:8443
 python3 cert_expiry_quickcheck.py -f hosts.txt --days 14
+python3 cert_expiry_quickcheck.py hosts.txt --days 45
 python3 cert_expiry_quickcheck.py -f hosts.txt --slack
 python3 cert_expiry_quickcheck.py -f hosts.txt --email
 ```
 
 - Targets are hostnames, `host:port`, or HTTPS origins; default port is 443.
+  Existing filenames work as positional arguments as well as through `-f`.
   IPv6 uses brackets, e.g. `[2001:db8::1]:443`. Target files allow `#` comments.
   Checks direct TLS only; no HTTP requests, STARTTLS service probes, or redirects.
-- Default warning window is 30 days. Certificate chain and hostname verification
-  remain enabled. Expired, untrusted or mismatched certificates that fail the
-  handshake are reported as `INVALID_CERT`, without an expiry date or insecure
-  retry. Network failures are `ERROR`, not a healthy result.
+- `WARNING` means expiry within `--days` (default 30); `CRITICAL` means expiry
+  within seven days. The critical level applies even if `--days` is below seven.
+  Thresholds compare exact remaining time rather than rounding down to whole days.
+  `OK` means beyond both windows. The earlier `EXPIRING` label is replaced by
+  WARNING/CRITICAL. Results with no expiry date appear first, then soonest expiry.
+- Certificate chain and hostname verification remain enabled. `EXPIRED` identifies
+  an elapsed expiry or the verifier's expired-certificate error; the latter may
+  refer to a certificate anywhere in the chain and has no leaf expiry date.
+  Other trust/hostname failures are `INVALID_CERT`. No insecure retry or guessed
+  dates are used. Network failures are `ERROR`, not a healthy result.
 - Alerts require the explicit `--slack` or `--email` flag (both are allowed).
   One summary is sent per enabled channel only when a target needs attention,
   including certificate validation failures and network errors. All-healthy runs
@@ -43,6 +51,18 @@ python3 cert_expiry_quickcheck.py -f hosts.txt --email
   checks or alert failure. Exit 2 takes precedence. Timeout is per socket operation,
   not a total run deadline. A single connection does not inventory every certificate
   behind a load balancer.
+
+The combination takes status levels, filename arguments and expiry ordering from
+the supplied `cert_expiry.py`; retains SMTP email, IPv6/URL validation, four-worker
+concurrency and alert-delivery checks; and keeps one summary per enabled channel.
+Expired verification errors use the [OpenSSL expiry error code](https://docs.openssl.org/1.0.2/man1/verify/)
+rather than substring matching the hostname or raw exception text.
+
+Run the focused offline tests (mock certificates, sockets, Slack and SMTP):
+
+```sh
+python3 -m unittest -v test_cert_expiry_quickcheck.py
+```
 
 ## Exposed sensitive files quick check (day 5)
 
