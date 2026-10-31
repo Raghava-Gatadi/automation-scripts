@@ -3,6 +3,47 @@
 Small Python utilities using only the standard library. Requires Python 3.9+;
 the secrets scanner also requires Git on your PATH.
 
+## Bulk certificate expiry quick check (day 6)
+
+`cert_expiry_quickcheck.py` checks the leaf TLS certificate for each target and
+prints its UTC expiry date and remaining days. Standard library only, four workers,
+one pass per invocation. No scheduler, saved state or alert deduplication.
+
+```sh
+python3 cert_expiry_quickcheck.py example.com api.example.com:8443
+python3 cert_expiry_quickcheck.py -f hosts.txt --days 14
+python3 cert_expiry_quickcheck.py -f hosts.txt --slack
+python3 cert_expiry_quickcheck.py -f hosts.txt --email
+```
+
+- Targets are hostnames, `host:port`, or HTTPS origins; default port is 443.
+  IPv6 uses brackets, e.g. `[2001:db8::1]:443`. Target files allow `#` comments.
+  Checks direct TLS only; no HTTP requests, STARTTLS service probes, or redirects.
+- Default warning window is 30 days. Certificate chain and hostname verification
+  remain enabled. Expired, untrusted or mismatched certificates that fail the
+  handshake are reported as `INVALID_CERT`, without an expiry date or insecure
+  retry. Network failures are `ERROR`, not a healthy result.
+- Alerts require the explicit `--slack` or `--email` flag (both are allowed).
+  One summary is sent per enabled channel only when a target needs attention,
+  including certificate validation failures and network errors. All-healthy runs
+  stay quiet in Slack/email. Repeated failing runs send repeated alerts.
+- For Slack, set `SLACK_WEBHOOK_URL` to an existing incoming webhook. The script
+  does not print the URL or follow redirects. Long summaries are truncated with
+  a note; full results remain in the console. See [Slack webhook setup](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/).
+- For email, set `SMTP_HOST`, `SMTP_FROM`, and `SMTP_TO` (comma-separated plain
+  addresses). Set `SMTP_USER` and `SMTP_PASSWORD` together when login is required.
+  `SMTP_MODE=starttls` and port 587 are defaults; use `SMTP_MODE=ssl` for implicit
+  TLS on port 465. `SMTP_PORT` overrides the port. TLS is required and verified;
+  there is no plaintext fallback. Keep credentials in your environment, not Git.
+- Configured alert destinations receive target names, expiry dates and error
+  summaries. No private keys or raw certificate contents are sent. SMTP acceptance
+  does not guarantee inbox delivery.
+- Exit **0**: all certificates valid and beyond the window; **1**: expiring,
+  expired or invalid certificates; **2**: invalid input/configuration, incomplete
+  checks or alert failure. Exit 2 takes precedence. Timeout is per socket operation,
+  not a total run deadline. A single connection does not inventory every certificate
+  behind a load balancer.
+
 ## Exposed sensitive files quick check (day 5)
 
 `sensitive_files_quickcheck.py` checks 25 fixed paths on your own assets. It combines
