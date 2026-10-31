@@ -5,6 +5,7 @@ GETs a short fixed path list, reads at most 4096 bytes per response, and never
 prints file contents. Exit: 0 no candidates, 1 candidates, 2 incomplete/error.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import http.client
 import ipaddress
@@ -23,7 +24,17 @@ READ_LIMIT = 4096
 PATHS = (("/.git/HEAD", "git-head"), ("/.git/config", "git-config"), ("/.git/", "git-index"),
          ("/.env", "env"), ("/.env.local", "env"), ("/.env.bak", "env"),
          ("/backup.zip", "zip"), ("/backup.tar.gz", "gzip"), ("/backup.sql", "sql"),
-         ("/config.php.bak", "php"))
+         ("/config.php.bak", "php"), ("/.aws/credentials", "aws"), ("/.npmrc", "npm"),
+         ("/.htpasswd", "htpasswd"), ("/id_rsa", "private-key"), ("/.ssh/id_rsa", "private-key"),
+         ("/.svn/wc.db", "sqlite"), ("/wp-config.php.bak", "php"), ("/wp-config.php~", "php"),
+         ("/site.zip", "zip"), ("/dump.sql", "sql"), ("/actuator/env", "actuator"),
+         ("/phpinfo.php", "phpinfo"), ("/server-status", "apache"),
+         ("/docker-compose.yml", "compose"), ("/.DS_Store", "ds-store"))
+ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+
+
+def severity(kind):
+    return "LOW" if kind == "ds-store" else "MEDIUM" if kind in {"actuator", "phpinfo", "apache", "compose"} else "HIGH"
 
 
 def origin(value):
@@ -78,7 +89,7 @@ def evidence(kind, body, content_type):
         if re.search(r"Index of\s+/\.git/?", text, re.I) and re.search(r"href=[\"'](?:HEAD|config|objects/)", text, re.I):
             return "Git directory listing markers"
         return None
-    if kind in {"git-head", "git-config", "env", "sql", "php"} and (html or b"\0" in body):
+    if kind in {"git-head", "git-config", "env", "sql", "php", "aws", "npm", "htpasswd", "private-key", "compose", "actuator"} and (html or b"\0" in body):
         return None
     if kind == "git-head" and re.fullmatch(r"(?:ref: refs/[^\s]+|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", text.strip()):
         return "Git HEAD structure"
@@ -98,13 +109,38 @@ def evidence(kind, body, content_type):
         return "SQL dump statements at a backup filename"
     if kind == "php" and re.search(r"^\s*<\?php\b", text) and re.search(r"(?:\bdefine\s*\(|\$[A-Za-z_][A-Za-z0-9_]*\s*=)", text):
         return "PHP source structure at a backup filename"
+    if kind == "aws" and all(re.search(r"^\s*" + key + r"\s*=\s*\S+", text, re.M | re.I)
+                             for key in ("aws_access_key_id", "aws_secret_access_key")):
+        return "AWS credential configuration structure; values withheld"
+    if kind == "npm" and re.search(r"^\s*(?://[^\s]+:)?_authToken\s*=\s*\S+", text, re.M):
+        return "npm authentication directive; verify whether the value is a token or substitution"
+    if kind == "htpasswd" and re.search(r"^[A-Za-z0-9_.@-]+:(?:\$apr1\$|\$2[aby]\$|\{SHA\}|\$[156]\$)\S{8,}", text, re.M):
+        return "Password-file hash structure; values withheld"
+    if kind == "private-key" and re.search(r"-----BEGIN (?:RSA |OPENSSH |EC |DSA |ENCRYPTED )?PRIVATE KEY-----", text):
+        return "Private-key header; contents withheld"
+    if kind == "sqlite" and body.startswith(b"SQLite format 3\0"):
+        return "SQLite database signature at a Subversion metadata path"
+    if kind == "ds-store" and body.startswith(b"\x00\x00\x00\x01Bud1"):
+        return "macOS directory metadata signature"
+    if kind == "compose" and re.search(r"^services:\s*(?:#.*)?\n[ \t]+[A-Za-z0-9_.-]+:", text, re.M):
+        return "Compose service configuration structure; publication may be intentional"
+    if kind == "actuator" and text.lstrip().startswith("{") and re.search(r'"propertySources"\s*:\s*\[', text) and re.search(r'"(?:activeProfiles|defaultProfiles)"\s*:\s*\[', text):
+        return "Actuator environment response structure; values may be redacted"
+    if kind == "phpinfo" and "PHP Version" in text and "phpinfo()" in text:
+        return "PHP diagnostic page markers"
+    if kind == "apache" and re.search(r"Apache (?:Server )?Status", text, re.I) and "Server Version:" in text:
+        return "Apache status page markers"
     return None
 
 
-def check(asset, timeout):
-    result = {"asset": asset, "complete": True, "checks": []}
+def check(asset, timeout, verify=True):
+    result = {"asset": asset, "complete": True, "tls_verification_enabled": verify, "checks": []}
     try:
-        opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+        context = ssl.create_default_context()
+        if not verify:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=context))
         control = fetch(opener, asset + "/.sensitive-check-" + secrets.token_hex(8), timeout)
         result["control_status"] = control["code"]
         if control["code"] == 429 or control["code"] >= 500:
@@ -112,7 +148,8 @@ def check(asset, timeout):
     except (OSError, ValueError, http.client.HTTPException):
         result.update(complete=False, error="Control request failed (network, TLS or server error); asset checks skipped")
         return result
-    for path, kind in PATHS:
+    def probe(entry):
+        path, kind = entry
         item = {"path": path, "status": "NO_MATCH"}
         try:
             response = fetch(opener, asset + path, timeout)
@@ -132,16 +169,17 @@ def check(asset, timeout):
                 else:
                     reason = evidence(kind, response["body"], response["type"])
                     if reason:
-                        item.update(status="CANDIDATE", reason=reason)
+                        item.update(status="CANDIDATE", severity=severity(kind), reason=reason)
             elif code == 429 or code >= 500:
                 raise ValueError("Rate limit or server failure")
             else:
                 item["status"] = "UNASSESSED"
-                result["complete"] = False
         except (OSError, ValueError, http.client.HTTPException):
             item.update(status="ERROR", reason="Request failed or response could not be assessed")
-            result["complete"] = False
-        result["checks"].append(item)
+        return item
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        result["checks"] = list(pool.map(probe, PATHS))
+    result["complete"] = all(item["status"] not in {"ERROR", "UNASSESSED"} for item in result["checks"])
     return result
 
 
@@ -152,6 +190,7 @@ def main(argv=None):
     parser.add_argument("--json", metavar="PATH", help="Save metadata-only JSON results")
     parser.add_argument("--timeout", type=float, default=8, help="Timeout per socket operation (default: 8 seconds)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show every path status")
+    parser.add_argument("-k", "--insecure", action="store_true", help="Explicitly disable TLS verification for this run (e.g. self-signed staging assets)")
     args = parser.parse_args(argv)
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("timeout must be positive and finite")
@@ -170,14 +209,17 @@ def main(argv=None):
         print("Error: invalid asset origin, input file or report path; no requests sent.", file=sys.stderr)
         return 2
     results = []
+    if args.insecure:
+        print("[INFO] TLS certificate and hostname verification disabled for this run.")
     for asset in assets:
-        result = check(asset, args.timeout)
+        result = check(asset, args.timeout, verify=not args.insecure)
         results.append(result)
         if result.get("error"):
             print(f'[ERROR] {asset}: {result["error"]}')
-        for item in result["checks"]:
-            if args.verbose or item["status"] in {"CANDIDATE", "ERROR"}:
-                print(f'[{item["status"]}] {asset}{item["path"]}: {item.get("reason", "HTTP " + str(item.get("http_status", "unknown")))}')
+        for item in sorted(result["checks"], key=lambda item: (ORDER.get(item.get("severity"), 3), item["path"])):
+            if args.verbose or item["status"] in {"CANDIDATE", "ERROR", "UNASSESSED"}:
+                label = item.get("severity", item["status"])
+                print(f'[{label}] {asset}{item["path"]}: {item.get("reason", "HTTP " + str(item.get("http_status", "unknown")))}')
     candidates = sum(item["status"] == "CANDIDATE" for result in results for item in result["checks"])
     incomplete = sum(not result["complete"] for result in results)
     print(f"{len(results)} asset(s); {candidates} candidate path(s); {incomplete} incomplete asset(s).")
