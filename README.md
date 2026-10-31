@@ -3,6 +3,45 @@
 Small Python utilities using only the standard library. Requires Python 3.9+;
 the secrets scanner also requires Git on your PATH.
 
+## Exposed sensitive files quick check (day 5)
+
+`sensitive_files_quickcheck.py` checks a short fixed path list on your own assets:
+`/.git/HEAD`, `/.git/config`, `/.git/`, `/.env`, `/.env.local`, `/.env.bak`,
+`/backup.zip`, `/backup.tar.gz`, `/backup.sql`, and `/config.php.bak`.
+
+```sh
+python3 sensitive_files_quickcheck.py https://app.example.com
+python3 sensitive_files_quickcheck.py -f assets.txt --json sensitive-report.json
+python3 sensitive_files_quickcheck.py https://app.example.com -v
+```
+
+- Only scan assets you own or are explicitly authorized to assess. Inputs are
+  origins (scheme, hostname and optional port); paths, credentials, queries, and
+  fragments are rejected. Bare hostnames default to HTTPS.
+- Performs one random nonexistent-path control request, followed by ten fixed
+  GETs. Sends a Range header and reads at most 4 KiB per successful response,
+  even if the server ignores Range. Certificates are verified. Redirects are
+  recorded but never followed; provide the intended final origin explicitly.
+- Flags recognizable Git metadata/listings, environment assignments to sensitive
+  keys, archive signatures, SQL dumps, and PHP source at backup paths. A 200 alone
+  is not a finding. Identical control/path bodies are treated as fallback pages.
+  HTML is rejected for text-file checks; custom/dynamic fallback pages can still
+  cause false positives. Review every candidate.
+- Output and JSON contain paths, HTTP status, and fixed explanations only.
+  Response contents, credentials, and header values are never printed or saved.
+  Archives are not extracted and repositories are not reconstructed.
+- `DENIED`, `REDIRECT`, and `NOT_FOUND` are observations, not exposure findings.
+  `NO_MATCH` means the bounded response did not match the expected structure;
+  it does not prove that the file is absent or harmless. Compression and malformed
+  partial responses are inconclusive. Rate limits and server errors are errors.
+- Exit **0**: no recognizable candidates in completed checks; **1**: candidates
+  to review; **2**: invalid input, incomplete requests, or report errors. Exit 2
+  takes precedence. Default output shows candidates/errors; `-v` shows all paths.
+  Timeout is per socket operation, not per asset or entire run.
+
+This is a first pass over common names, not a comprehensive file search. Git
+signatures follow the [Git repository layout documentation](https://git-scm.com/docs/gitrepository-layout).
+
 ## Dangling CNAME quick check (day 4)
 
 `subdomain_quickcheck.py` follows CNAME chains for supplied hostnames and flags
