@@ -1,0 +1,10 @@
+{
+  "checks": {
+    "appsec": ["-f", "assets.txt"],
+    "secrets": ["/absolute/path/to/your/repo"],
+    "dependencies": ["/absolute/path/to/your/repo"],
+    "subdomains": ["-f", "subdomains.txt"],
+    "sensitive_files": ["-f", "assets.txt"],
+    "certificates": ["-f", "hosts.txt", "--days", "30"]
+  }
+}

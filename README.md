@@ -3,6 +3,60 @@
 Small Python utilities using only the standard library. Requires Python 3.9+;
 the secrets scanner also requires Git on your PATH.
 
+## Weekly runner (Days 1–6)
+
+`weekly_runner.py` calls the six scripts in day order and writes **one Markdown
+report** with a status table and each script's combined console/error output.
+Findings, failures and timeouts do not prevent later steps from running.
+
+```sh
+cp weekly_runner.example.json weekly_runner.json
+# Edit weekly_runner.json with your repo path and your authorized target files.
+python3 weekly_runner.py weekly_runner.json
+```
+
+The example reuses `assets.txt` (HTTP(S) origins) for Days 1 and 5,
+`subdomains.txt` (DNS hostnames) for Day 4, and `hosts.txt` (TLS hosts/ports) for
+Day 6. Day 2 scans your repository; Day 3 discovers dependency manifests there.
+Keep all six check keys. Each value is the normal script's CLI arguments as a
+JSON list; no shell expansion is performed. Arguments and target-file paths are
+relative to the config's directory. Scripts are located beside the runner.
+
+- Default output: `reports/weekly-report.md`, relative to the config directory.
+  `--report PATH` selects another destination. Repeated runs replace that report
+  atomically; unrelated existing files are protected. The local config and
+  `reports/` directory are ignored by Git. Reports can contain internal asset and
+  repository names; store them appropriately.
+- Each script has a five-minute limit; change it with `--step-timeout SECONDS`.
+  The report records partial output from timed-out checks. A missing script is an
+  error, not a skipped success. Exit **0** means all six returned 0; **1** means
+  findings; **2** means at least one incomplete/error/timeout or report failure.
+  Exit 2 takes precedence; review the report even when a step passes, because
+  individual tools can have below-threshold findings and documented skipped scope.
+- The sample enables no alerts, history scan, HTTP takeover probes, baseline writes,
+  or insecure TLS. You can explicitly add normal script options to the config;
+  treat it as trusted executable configuration. For certificate alerts, add
+  `--slack`/`--email` to `certificates` and provide the documented environment
+  variables. They notify about certificate issues, not the whole weekly report.
+
+The runner performs one pass. To run it weekly, configure cron or your CI scheduler.
+For example, this cron entry runs Mondays at 09:00 in the scheduler's timezone
+(replace every path, including the Python executable, with your actual paths):
+
+```cron
+0 9 * * 1 /absolute/path/to/python3 "/absolute/path/to/Automation Scripts/weekly_runner.py" "/absolute/path/to/weekly_runner.json" >> "/absolute/path/to/weekly-runner.log" 2>&1
+```
+
+Cron has a limited environment. Use absolute paths, make Git available on PATH,
+and supply any alert environment variables through your scheduler's protected
+configuration. Scheduling and live target selection are left to your local config.
+
+Offline runner tests use temporary stand-in scripts and send no network traffic:
+
+```sh
+python3 -m unittest -v test_weekly_runner.py
+```
+
 ## Bulk certificate expiry quick check (day 6)
 
 `cert_expiry_quickcheck.py` checks the leaf TLS certificate for each target and

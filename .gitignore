@@ -9,3 +9,5 @@ venv/
 *.pem
 *.key
 .aws/
+reports/
+/weekly_runner.json
