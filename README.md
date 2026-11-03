@@ -1,7 +1,49 @@
 # Automation scripts
 
 Small Python utilities using only the standard library. Requires Python 3.9+;
-the secrets scanner also requires Git on your PATH.
+the secrets scanner requires Git, and the Semgrep wrapper requires Semgrep CLI
+(plus Git for baseline comparison) on your PATH.
+
+## Semgrep quick check
+
+`semgrep_quickcheck.py` runs Semgrep and summarizes finding counts by severity,
+rule and affected file. It uses Semgrep's native Git baseline comparison rather
+than inventing fingerprints or maintaining an accepted-findings file.
+
+```sh
+# Install Semgrep CLI separately using its official installation instructions.
+python3 semgrep_quickcheck.py /path/to/repo --config p/default
+python3 semgrep_quickcheck.py /path/to/repo --config p/default --baseline HEAD~1
+python3 semgrep_quickcheck.py /path/to/repo --config .semgrep.yml --baseline origin/main --json reports/semgrep-summary.json
+```
+
+- `--config` is required and repeatable. Local rule paths are relative to the
+  scanned directory; registry configs require network access. Trust the rules
+  you select. This uses `semgrep scan` with the OSS engine, metrics off, version
+  checks disabled, strict errors and finding exit codes. No autofix is requested.
+- Without `--baseline`, reports all findings returned by the selected scan.
+  With it, resolves the local Git ref to a commit and delegates comparison to
+  `--baseline-commit`: only findings absent from that baseline are returned.
+  A missing/invalid baseline fails; it never falls back to a full scan.
+  Fetch needed refs yourself and use a clean working tree as required by Semgrep.
+  This is not an inventory of old, resolved or unchanged findings.
+- Prints the top five rules and first twenty finding locations. Optional JSON
+  saves all returned locations and summary counts. Source snippets, interpolated
+  messages, metavariables, fixes, traces and raw stderr are not printed or saved.
+  Rule IDs, file paths and metadata remain visible. Run Semgrep directly when
+  you need its detailed error diagnostics. Output paths are relative to your
+  invoking directory; the parent directory must exist. Existing wrapper reports
+  can be refreshed; unrelated existing files are protected.
+- Semgrep's ignore rules, supported languages and normal size/coverage limits
+  still apply. Skipped rules or JSON-reported scan errors produce an incomplete
+  result. A zero-finding diff (or zero scanned files) is not a full security audit.
+  `--timeout` caps the Semgrep process at 300 seconds by default.
+- Exit **0**: completed with no findings; **1**: completed with findings; **2**:
+  missing tools, invalid config/baseline, timeout, partial/error results or output
+  failure. This standalone wrapper is not added to the six-step weekly runner.
+
+References: [Semgrep CLI and baseline options](https://docs.semgrep.dev/cli-reference),
+[Semgrep JSON fields](https://docs.semgrep.dev/semgrep-appsec-platform/json-and-sarif).
 
 ## Weekly runner (Days 1–6)
 
