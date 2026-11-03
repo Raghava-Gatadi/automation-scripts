@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import semgrep_quickcheck as scanner
+from scripts.repository import semgrep_quickcheck as scanner
 
 
 def finding(line=1, severity="WARNING", path="app.py"):

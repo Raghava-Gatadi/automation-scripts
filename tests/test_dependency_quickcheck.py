@@ -8,7 +8,7 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
-import dependency_quickcheck as checker
+from scripts.repository import dependency_quickcheck as checker
 
 
 class DependencyTests(unittest.TestCase):

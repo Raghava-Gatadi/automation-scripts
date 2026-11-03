@@ -11,7 +11,7 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
-import appsec_quickcheck as scanner
+from scripts.web import appsec_quickcheck as scanner
 
 
 GOOD_HEADERS = [

@@ -3,12 +3,14 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import runpy
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-import weekly_runner as runner
+from scripts import weekly_runner as runner
 
 
 class RunnerTests(unittest.TestCase):
@@ -31,7 +33,9 @@ class RunnerTests(unittest.TestCase):
                       "print('cwd=' + str(Path.cwd()))\n"
                       "print('arg=' + sys.argv[1])\n"
                       f"print('stderr={key}', file=sys.stderr)\nraise SystemExit({code})\n")
-            (self.root / filename).write_text(source)
+            destination = self.root / filename
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(source)
 
     def test_six_real_subprocesses_keep_order_and_continue_after_errors(self):
         self.fake_scripts([0, 1, 2, 0, 0, 0])
@@ -108,8 +112,20 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("    <script>fixture</script>", text)
 
     def test_example_config_contains_every_check(self):
-        example = Path(runner.__file__).with_name("weekly_runner.example.json")
+        example = Path(runner.__file__).resolve().parents[1] / "examples" / "weekly_runner.example.json"
         self.assertEqual(set(runner.load_config(example)), set(self.checks))
+
+    def test_bundled_layout_and_direct_script_imports(self):
+        for _, _, filename in runner.CHECKS:
+            self.assertTrue((runner.SCRIPT_DIR / filename).is_file(), filename)
+        targets = self.root / "targets.txt"
+        targets.write_text("app.example.invalid\n")
+        # Direct execution has no package context; test its sibling imports too.
+        with patch.object(sys, "path", [str(runner.SCRIPT_DIR), *sys.path]):
+            direct = runpy.run_path(str(Path(runner.__file__)))
+            checks = direct["quick_checks"](None, str(targets), self.root)
+        self.assertIsNotNone(checks["subdomains"])
+        self.assertIsNotNone(checks["sensitive_files"])
 
     def test_quick_inputs_normalize_targets_for_each_tool(self):
         project, scratch = self.root / "project", self.root / "scratch"

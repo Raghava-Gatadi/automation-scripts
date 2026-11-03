@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-import cert_expiry_quickcheck as scanner
+from scripts.network import cert_expiry_quickcheck as scanner
 
 NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
 

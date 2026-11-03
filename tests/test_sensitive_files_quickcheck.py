@@ -10,7 +10,7 @@ import unittest
 import urllib.error
 from unittest.mock import MagicMock, patch
 
-import sensitive_files_quickcheck as scanner
+from scripts.web import sensitive_files_quickcheck as scanner
 
 ASSET = "https://app.example.invalid"
 PRIVATE = b"DB_PASSWORD" + b"=private-fixture-value\n"

@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-import git_secrets_scan as scanner
+from scripts.repository import git_secrets_scan as scanner
 
 
 SCRIPT = Path(scanner.__file__).resolve()

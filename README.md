@@ -1,641 +1,80 @@
 # Security Automation Scripts
 
-Small Python utilities using only the standard library. Requires Python 3.9+;
-the secrets scanner requires Git, and the Semgrep wrapper requires Semgrep CLI
-(plus Git for baseline comparison) on your PATH.
+Small first-pass security checks to run before investigating a project or your
+own assets. Each tool runs independently. Python 3.9+ and the standard library
+are enough, except the secrets scanner needs Git and the Semgrep wrapper needs
+the Semgrep CLI (plus Git for Git baseline comparisons).
+
+## Repository layout
+
+```text
+scripts/
+  web/          Web security headers and exposed sensitive files
+  repository/   Secrets, dependency vulnerabilities and Semgrep
+  network/      Dangling CNAMEs and certificate expiry
+  weekly_runner.py
+tests/          Offline unit and integration tests
+examples/       Sample runner configuration
+docs/           Usage, options and limitations for each tool
+```
+
+Run commands below from the repository root. Script paths can also be absolute;
+target and output paths keep their documented working-directory/config semantics.
 
 ## Utility index
 
-| Utility | Purpose |
-| --- | --- |
-| [semgrep_quickcheck.py](semgrep_quickcheck.py) | Semgrep wrapper and reviewed baselines |
-| [appsec_quickcheck.py](appsec_quickcheck.py) | Application-security checks |
-| [dependency_quickcheck.py](dependency_quickcheck.py) | Dependency review |
-| [git_secrets_scan.py](git_secrets_scan.py) | Git secret scanning |
-| [sensitive_files_quickcheck.py](sensitive_files_quickcheck.py) | Sensitive-file checks |
-| [cert_expiry_quickcheck.py](cert_expiry_quickcheck.py) | TLS certificate expiry |
-| [subdomain_quickcheck.py](subdomain_quickcheck.py) | Subdomain checks |
-| [weekly_runner.py](weekly_runner.py) | Scheduled checks and report orchestration |
-
-The sections below retain each utility's exact options, network behavior, baseline semantics, and limits.
-
-## Semgrep quick check
-
-`semgrep_quickcheck.py` runs Semgrep and summarizes new findings by severity,
-rule and affected file. It combines accepted-findings files from the supplied
-`semgrep_wrap.py` with the original wrapper's native Git comparison and error handling.
-
-```sh
-# Install Semgrep CLI separately using its official installation instructions.
-python3 semgrep_quickcheck.py /path/to/repo
-python3 semgrep_quickcheck.py /path/to/repo --update-baseline
-python3 semgrep_quickcheck.py /path/to/repo --fail-on ERROR
-python3 semgrep_quickcheck.py /path/to/repo --config p/default
-python3 semgrep_quickcheck.py /path/to/repo --config p/default --baseline HEAD~1
-python3 semgrep_quickcheck.py /path/to/repo --config .semgrep.yml --baseline origin/main --json reports/semgrep-summary.json
-```
-
-- `--config` is repeatable and defaults to `p/default`. Local rule paths are relative to the
-  scanned directory; registry configs require network access. Trust the rules
-  you select. This uses `semgrep scan` with the OSS engine, metrics off, version
-  checks disabled, strict errors and finding exit codes. No autofix is requested.
-- By default, compares against `<repo>/.semgrep-baseline.json`. A missing file
-  means all findings are new. `--baseline-file PATH` chooses another file relative
-  to the repo. `--update-baseline` explicitly accepts all current findings after
-  a complete scan, writes atomically and exits 0. It never overwrites the baseline
-  after scan errors, skipped rules, missing source, or timeout.
-- File fingerprints cover rule ID, repo-relative file, severity and exact matched
-  source lines, excluding line numbers. Line moves remain baselined; edits inside
-  strings, formatting or severity changes resurface. An occurrence counter detects
-  added identical matches. Source files must stay available and stable during
-  the scan; unreadable/outside-repo source fails instead of hashing empty content.
-  Baselines contain locations and hashes, not source, but hashes of guessable
-  content can be guessed. Review baseline changes before committing them.
-- Absent baseline entries are called **stale**, not fixed: rules, exclusions or
-  scope changes can also explain their absence. Use consistent scope/rules when
-  refreshing. The supplied standalone script used a different truncated hash
-  format; regenerate into a new baseline path and review it rather than copying
-  that baseline directly.
-- `--baseline COMMIT_OR_REF` instead selects native Git diff mode. It is mutually
-  exclusive with file-baseline selection/update. It resolves the local ref and delegates comparison to
-  `--baseline-commit`: only findings absent from that baseline are returned.
-  A missing/invalid baseline fails; it never falls back to a full scan.
-  Fetch needed refs yourself and use a clean working tree as required by Semgrep.
-  This mode is not an inventory of old, resolved or unchanged findings.
-- `--fail-on INFO` (default) fails for any new finding. Choose WARNING or ERROR
-  to change the gate; below-threshold findings remain visible. The threshold and
-  blocking count are printed. Unlike the supplied version, messages that may
-  interpolate source values are excluded from console and JSON.
-- Prints the top five rules and first twenty finding locations. Optional JSON
-  saves all returned locations and summary counts. Source snippets, interpolated
-  messages, metavariables, fixes, traces and raw stderr are not printed or saved.
-  Rule IDs, file paths and metadata remain visible. Run Semgrep directly when
-  you need its detailed error diagnostics. Output paths are relative to your
-  invoking directory; the parent directory must exist. Existing wrapper reports
-  can be refreshed; unrelated existing files are protected.
-- Semgrep's ignore rules, supported languages and normal size/coverage limits
-  still apply. Skipped rules or JSON-reported scan errors produce an incomplete
-  result. A zero-finding diff (or zero scanned files) is not a full security audit.
-  `--timeout` caps the Semgrep process at 300 seconds by default.
-- Exit **0**: completed with no new findings at/above the threshold, or a successful
-  baseline update; **1**: new findings meet the threshold; **2**:
-  missing tools, invalid config/baseline, timeout, partial/error results or output
-  failure. This standalone wrapper is not added to the six-step weekly runner.
-
-References: [Semgrep CLI and baseline options](https://docs.semgrep.dev/cli-reference),
-[Semgrep JSON fields](https://docs.semgrep.dev/semgrep-appsec-platform/json-and-sarif).
-
-Offline tests use Semgrep JSON fixtures and send no network traffic:
-
-```sh
-python3 -m unittest -v test_semgrep_quickcheck.py
-```
-
-## Weekly runner (Days 1–6)
-
-`weekly_runner.py` calls the six scripts in day order and writes **one Markdown
-report** with a status table and each script's combined console/error output.
-Findings, failures and timeouts do not prevent later steps from running.
-
-```sh
-cp weekly_runner.example.json weekly_runner.json
-# Edit weekly_runner.json with your repo path and your authorized target files.
-python3 weekly_runner.py weekly_runner.json
-# Or use quick inputs without a JSON config:
-python3 weekly_runner.py --repo /path/to/project --targets targets.txt
-python3 weekly_runner.py --repo /path/to/project
-python3 weekly_runner.py --targets targets.txt
-```
-
-The example reuses `assets.txt` (HTTP(S) origins) for Days 1 and 5,
-`subdomains.txt` (DNS hostnames) for Day 4, and `hosts.txt` (TLS hosts/ports) for
-Day 6. Day 2 scans your repository; Day 3 discovers dependency manifests there.
-Keep all six check keys. Each value is the normal script's CLI arguments as a
-JSON list; no shell expansion is performed. Arguments and target-file paths are
-relative to the config's directory. Scripts are located beside the runner.
-
-Quick inputs are taken from the supplied runner, adapted to this repository's
-actual script names. `--targets` accepts DNS names or HTTP(S) origins, not URL
-paths/queries. It creates temporary per-tool files: web tools receive origins,
-the CNAME tool receives full DNS names (IP/short-name omissions are noted), and
-the certificate tool receives host/port targets. HTTP origins map to TLS port
-443; explicit HTTPS ports are preserved. Missing input groups and absent root
-dependency manifests appear as **SKIPPED**, not PASS. `--repo` scans the working
-tree; use JSON config to opt into history or additional tool flags. Config-file
-and quick-input modes cannot be combined.
-
-- Default output: `reports/weekly-report.md`, relative to the config directory.
-  Quick mode defaults to `reports/weekly-report-YYYY-MM-DD.md` (UTC date) relative
-  to the current directory. `--out` aliases `--report`; `--timeout` aliases
-  `--step-timeout`.
-  `--report PATH` selects another destination. Repeated runs replace that report
-  atomically; unrelated existing files are protected. The local config and
-  `reports/` directory are ignored by Git. Reports can contain internal asset and
-  repository names; store them appropriately.
-- Each script has a five-minute limit; change it with `--step-timeout SECONDS`.
-  The report records partial output from timed-out checks. Each section is capped
-  at 300 lines with an explicit omission count; run that tool directly for full
-  output. A missing script is an
-  error, not a skipped success. Exit **0** means all six returned 0; **1** means
-  findings; **2** means at least one incomplete/error/timeout or report failure.
-  Exit 2 takes precedence; review the report even when a step passes, because
-  individual tools can have below-threshold findings and documented skipped scope.
-  In quick mode, exit 0 means selected checks passed; SKIPPED checks were not run.
-- The sample enables no alerts, history scan, HTTP takeover probes, baseline writes,
-  or insecure TLS. You can explicitly add normal script options to the config;
-  treat it as trusted executable configuration. For certificate alerts, add
-  `--slack`/`--email` to `certificates` and provide the documented environment
-  variables. They notify about certificate issues, not the whole weekly report.
-
-The runner performs one pass. To run it weekly, configure cron or your CI scheduler.
-For example, this cron entry runs Mondays at 09:00 in the scheduler's timezone
-(replace every path, including the Python executable, with your actual paths):
-
-```cron
-0 9 * * 1 /absolute/path/to/python3 "/absolute/path/to/Automation Scripts/weekly_runner.py" "/absolute/path/to/weekly_runner.json" >> "/absolute/path/to/weekly-runner.log" 2>&1
-```
-
-Cron has a limited environment. Use absolute paths, make Git available on PATH,
-and supply any alert environment variables through your scheduler's protected
-configuration. Scheduling and live target selection are left to your local config.
-
-Offline runner tests use temporary stand-in scripts and send no network traffic:
-
-```sh
-python3 -m unittest -v test_weekly_runner.py
-```
-
-## Bulk certificate expiry quick check (day 6)
-
-`cert_expiry_quickcheck.py` checks the leaf TLS certificate for each target and
-prints its UTC expiry date and remaining days. Standard library only, four workers,
-one pass per invocation. No scheduler, saved state or alert deduplication.
-
-```sh
-python3 cert_expiry_quickcheck.py example.com api.example.com:8443
-python3 cert_expiry_quickcheck.py -f hosts.txt --days 14
-python3 cert_expiry_quickcheck.py hosts.txt --days 45
-python3 cert_expiry_quickcheck.py -f hosts.txt --slack
-python3 cert_expiry_quickcheck.py -f hosts.txt --email
-```
-
-- Targets are hostnames, `host:port`, or HTTPS origins; default port is 443.
-  Existing filenames work as positional arguments as well as through `-f`.
-  IPv6 uses brackets, e.g. `[2001:db8::1]:443`. Target files allow `#` comments.
-  Checks direct TLS only; no HTTP requests, STARTTLS service probes, or redirects.
-- `WARNING` means expiry within `--days` (default 30); `CRITICAL` means expiry
-  within seven days. The critical level applies even if `--days` is below seven.
-  Thresholds compare exact remaining time rather than rounding down to whole days.
-  `OK` means beyond both windows. The earlier `EXPIRING` label is replaced by
-  WARNING/CRITICAL. Results with no expiry date appear first, then soonest expiry.
-- Certificate chain and hostname verification remain enabled. `EXPIRED` identifies
-  an elapsed expiry or the verifier's expired-certificate error; the latter may
-  refer to a certificate anywhere in the chain and has no leaf expiry date.
-  Other trust/hostname failures are `INVALID_CERT`. No insecure retry or guessed
-  dates are used. Network failures are `ERROR`, not a healthy result.
-- Alerts require the explicit `--slack` or `--email` flag (both are allowed).
-  One summary is sent per enabled channel only when a target needs attention,
-  including certificate validation failures and network errors. All-healthy runs
-  stay quiet in Slack/email. Repeated failing runs send repeated alerts.
-- For Slack, set `SLACK_WEBHOOK_URL` to an existing incoming webhook. The script
-  does not print the URL or follow redirects. Long summaries are truncated with
-  a note; full results remain in the console. See [Slack webhook setup](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/).
-- For email, set `SMTP_HOST`, `SMTP_FROM`, and `SMTP_TO` (comma-separated plain
-  addresses). Set `SMTP_USER` and `SMTP_PASSWORD` together when login is required.
-  `SMTP_MODE=starttls` and port 587 are defaults; use `SMTP_MODE=ssl` for implicit
-  TLS on port 465. `SMTP_PORT` overrides the port. TLS is required and verified;
-  there is no plaintext fallback. Keep credentials in your environment, not Git.
-- Configured alert destinations receive target names, expiry dates and error
-  summaries. No private keys or raw certificate contents are sent. SMTP acceptance
-  does not guarantee inbox delivery.
-- Exit **0**: all certificates valid and beyond the window; **1**: expiring,
-  expired or invalid certificates; **2**: invalid input/configuration, incomplete
-  checks or alert failure. Exit 2 takes precedence. Timeout is per socket operation,
-  not a total run deadline. A single connection does not inventory every certificate
-  behind a load balancer.
-
-The combination takes status levels, filename arguments and expiry ordering from
-the supplied `cert_expiry.py`; retains SMTP email, IPv6/URL validation, four-worker
-concurrency and alert-delivery checks; and keeps one summary per enabled channel.
-Expired verification errors use the [OpenSSL expiry error code](https://docs.openssl.org/1.0.2/man1/verify/)
-rather than substring matching the hostname or raw exception text.
-
-Run the focused offline tests (mock certificates, sockets, Slack and SMTP):
-
-```sh
-python3 -m unittest -v test_cert_expiry_quickcheck.py
-```
-
-## Exposed sensitive files quick check (day 5)
-
-`sensitive_files_quickcheck.py` checks 25 fixed paths on your own assets. It combines
-the supplied `exposed_files.py` path signatures, severity labels and concurrency
-with fallback-page detection, bounded reads, JSON and explicit failure reporting.
-
-| Category | Paths |
-| --- | --- |
-| Git and SVN | `/.git/HEAD`, `/.git/config`, `/.git/`, `/.svn/wc.db` |
-| Environment and credentials | `/.env`, `/.env.local`, `/.env.bak`, `/.aws/credentials`, `/.npmrc`, `/.htpasswd` |
-| Private keys | `/id_rsa`, `/.ssh/id_rsa` |
-| Backups | `/backup.zip`, `/site.zip`, `/backup.tar.gz`, `/backup.sql`, `/dump.sql`, `/config.php.bak`, `/wp-config.php.bak`, `/wp-config.php~` |
-| Diagnostics and configuration | `/actuator/env`, `/phpinfo.php`, `/server-status`, `/docker-compose.yml`, `/.DS_Store` |
-
-```sh
-python3 sensitive_files_quickcheck.py https://app.example.com
-python3 sensitive_files_quickcheck.py -f assets.txt --json sensitive-report.json
-python3 sensitive_files_quickcheck.py https://app.example.com -v
-python3 sensitive_files_quickcheck.py https://staging.example.com -k
-```
-
-- Only scan assets you own or are explicitly authorized to assess. Inputs are
-  origins (scheme, hostname and optional port); paths, credentials, queries, and
-  fragments are rejected. Bare hostnames default to HTTPS.
-- Performs one random nonexistent-path control request, followed by 25 fixed
-  GETs with up to four concurrent requests. Sends a Range header and reads at most
-  4 KiB per successful response, even if the server ignores Range. Certificates
-  are verified by default. `-k`/`--insecure` explicitly disables certificate and
-  hostname verification for that run; console output and the JSON field
-  `tls_verification_enabled` record this choice. There is no automatic insecure
-  retry after TLS failure. Redirects are
-  recorded but never followed; provide the intended final origin explicitly.
-- Flags recognizable Git metadata/listings, environment assignments to sensitive
-  keys, credentials/configuration, archive signatures, SQL dumps, PHP source at
-  backup paths, and diagnostic-page markers. A 200 alone
-  is not a finding. Identical control/path bodies are treated as fallback pages.
-  HTML is rejected for text-file checks; custom/dynamic fallback pages can still
-  cause false positives. Review every candidate.
-- HIGH/MEDIUM/LOW are triage labels, not proof of a secret. HIGH covers credential,
-  repository and backup candidates; MEDIUM covers diagnostics and Compose
-  configuration; LOW covers directory metadata. Actuator values may be redacted,
-  npm configuration may use environment substitution, and published configuration
-  or archives may be intentional. HTML exclusion stays in place for text-file
-  checks; recognizable HTML diagnostic pages have separate signatures.
-- Output and JSON contain paths, HTTP status, and fixed explanations only.
-  Response contents, credentials, and header values are never printed or saved.
-  Archives are not extracted and repositories are not reconstructed.
-- `DENIED`, `REDIRECT`, and `NOT_FOUND` are observations, not exposure findings.
-  `NO_MATCH` means the bounded response did not match the expected structure;
-  it does not prove that the file is absent or harmless. Compression and malformed
-  partial responses are inconclusive. Rate limits and server errors are errors.
-- Exit **0**: no recognizable candidates in completed checks; **1**: candidates
-  to review; **2**: invalid input, incomplete requests, or report errors. Exit 2
-  takes precedence. Default output shows candidates/errors; `-v` shows all paths.
-  Timeout is per socket operation, not per asset or entire run.
-
-This is a first pass over common names, not a comprehensive file search. Git
-signatures follow the [Git repository layout documentation](https://git-scm.com/docs/gitrepository-layout).
-The combined list omits duplicate backup names and less useful legacy diagnostics.
-It also omits `/actuator/heapdump`: [requesting it produces a JVM heap dump](https://docs.spring.io/spring-boot/api/rest/actuator/heapdump.html),
-which can impose server work even when the client limits its read. Environment
-diagnostic structure follows [Spring's env endpoint documentation](https://docs.spring.io/spring-boot/api/rest/actuator/env.html).
-
-Run the focused tests (mocked responses only; no live asset requests):
-
-```sh
-python3 -m unittest -v test_sensitive_files_quickcheck.py
-```
-
-## Dangling CNAME quick check (day 4)
-
-`subdomain_quickcheck.py` follows CNAME chains for supplied hostnames and flags
-missing targets for manual review. Uses Python's standard library and
-[Google Public DNS's JSON API](https://developers.google.com/speed/public-dns/docs/doh/json).
-
-```sh
-python3 subdomain_quickcheck.py app.example.com docs.example.com
-python3 subdomain_quickcheck.py -f subdomains.txt --json cname-report.json
-python3 subdomain_quickcheck.py subdomains.txt --http -v
-```
-
-- Accepts hostnames or a file with one per line, deduplicates inputs, and follows
-  up to ten CNAME links. Positional filenames and `-f` both work. Four concurrent
-  checks keep larger lists quick. Inputs must be hostnames rather than URLs;
-  no enumeration is performed. Default output shows candidates and errors;
-  `-v` shows all observations. JSON always includes every result.
-- `DANGLING`: an observed CNAME chain ends in NXDOMAIN. `NO_ADDRESS`: the target
-  exists but has neither A nor AAAA data; check its intended use. Both are review
-  candidates, not proof a resource can be claimed.
-- `RESOLVES`: an address was found. This does not rule out an unclaimed hosted
-  service. `NO_CNAME` and `NOT_FOUND` describe the input hostname, without implying
-  a takeover finding. A nonexistent input alone is not a dangling CNAME.
-- `ERROR`: timeouts, DNS errors such as SERVFAIL/REFUSED, loops, changing answers,
-  invalid API responses, or a depth limit. Requested HTTP probes that fail or
-  redirect also produce ERROR. These results are inconclusive.
-- `--http` enables one HTTPS GET to the **original input hostname** for a resolving
-  CNAME chain matching a supplied service pattern. Checks the first 20,000 body
-  bytes, including HTTP error bodies such as 404. TLS verification remains enabled;
-  redirects are not followed and there is no plaintext retry. Bodies are not saved.
-  DNS-only remains the default. Unknown providers are not HTTP-probed.
-- `SERVICE_CLUE`: a known service's error-page text matched, prompting manual
-  review. Missing text does **not** mean a resource is claimed. Page wording,
-  localization, compression, and the body limit can cause missed matches.
-  A redirect or failed probe retains `dns_status` and HTTP metadata in JSON.
-- The supplied `takeover_check.py` contributes patterns for GitHub Pages, Heroku,
-  S3, Shopify, Fastly, Surge, Pantheon, Zendesk, Bitbucket, Ghost, and Tumblr.
-  These are static page clues, not a current list of exploitable providers; confirm
-  findings against the [service guidance](https://github.com/EdOverflow/can-i-take-over-xyz).
-  Azure suffixes add context without HTTP fingerprint checks. Provider protections
-  and resource claimability require separate review; see
-  [Microsoft's dangling DNS guidance](https://learn.microsoft.com/en-us/azure/security/fundamentals/subdomain-takeover).
-- Queries go to Google Public DNS; only check names you are authorized to assess.
-  Internal/split DNS may look different from this public resolver. This is a
-  single cached DNS view; confirm findings against authoritative DNS before acting.
-  The timeout is per request, not for the whole run. No accounts or resources are
-  created, and the script does not attempt to claim targets.
-- Exit **0**: no candidates observed in the selected checks; **1**: candidates to review; **2**:
-  invalid input, inconclusive lookup, or report error. Exit 2 takes precedence.
-
-The combination keeps this script's dependency-free DNS-over-HTTPS, full CNAME
-chain, IPv6 handling, JSON, and distinct DNS error states. From the supplied
-version it takes service-page clues, file arguments, concise output and bounded
-concurrency. It avoids treating a missing fingerprint as “claimed” or an error
-page as a confirmed vulnerability. No `dig` installation is required.
-
-Run the focused tests (mocked DNS and HTTP, no live requests):
-
-```sh
-python3 -m unittest -v test_subdomain_quickcheck.py
-```
-
-## Dependency quick check (day 3)
-
-`dependency_quickcheck.py` sends exact package versions from `requirements.txt`,
-`package.json`, and `package-lock.json` (v2/v3) to the [OSV API](https://google.github.io/osv.dev/post-v1-querybatch/)
-and prints advisory IDs with links. It uses only the Python standard library.
-
-```sh
-python3 dependency_quickcheck.py                   # manifests in this directory
-python3 dependency_quickcheck.py /path/to/project
-python3 dependency_quickcheck.py requirements.txt frontend/package.json
-python3 dependency_quickcheck.py requirements.txt frontend/package-lock.json
-python3 dependency_quickcheck.py /path/to/project --json dependency-report.json
-```
-
-- Checks Python `name==version` pins (including extras and hash annotations),
-  plus exact npm versions in dependencies, devDependencies and optionalDependencies.
-  Python environment markers are not evaluated: every supported declared pin is
-  checked, even if its marker would exclude it on the current machine.
-- When given a directory, prefers `package-lock.json` over `package.json` and
-  prints the selected input files. Explicit file arguments are honored even when
-  a sibling lockfile exists. A malformed lockfile fails rather than silently
-  falling back to a manifest. Lockfile v1 is unsupported.
-- Lockfile scans include pinned direct and transitive registry packages, including
-  nested/scoped packages and recorded dev/optional packages. The project root is
-  excluded. Recorded real names are used for aliases when available. Git/local
-  dependencies, workspace links, and entries without usable names or versions
-  are listed as skipped. OS/platform applicability is not evaluated. Lockfiles
-  describe a dependency snapshot; the script does not verify freshness against
-  package.json or check the actual installed tree.
-- Lists unsupported entries as skipped. It does not guess versions for ranges
-  such as `>=1.0` or `^1.2.3`, resolve tags/aliases, follow requirements includes,
-  or install dependencies. Peer requirements and workspaces are flagged for
-  follow-up when scanning package.json; pass each workspace's manifest explicitly.
-  Python pins and standalone package.json scans cover declared dependencies only.
-- Queries unique ecosystem/name/version combinations in batches and follows OSV
-  pagination. Multiple advisory records can describe the same underlying issue.
-  Links provide details; the script does not calculate severity or choose upgrades.
-- Sends package names and versions to OSV, including private package names if
-  declared with supported pins. It does not send entire manifests or index URLs.
-- Exit **0**: all supported declarations checked with no matching advisories;
-  **1**: advisories found; **2**: skipped entries, invalid input, network/API errors,
-  or report-write failure. Exit 2 takes precedence over discovered advisories.
-  An empty manifest has zero packages to check; no matching advisory is not proof
-  that a dependency is safe.
-
-The combined version keeps lockfile support and the short advisory summary from
-the supplied `osv_check.py`, plus exact-version validation, pagination, cross-file
-deduplication, skip reporting, and JSON from the first version. It deliberately
-does not strip `^` or `~` to treat a range's lower bound as an installed version.
-Lockfile handling follows the [npm lockfile format](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/).
-
-Run the dependency tests (temporary manifests and mocked OSV, no live API calls):
-
-```sh
-python3 -m unittest -v test_dependency_quickcheck.py
-```
-
-## Git repository secrets scanner
-
-`git_secrets_scan.py` scans tracked working-tree files for private keys, common
-provider token formats, credentials in URLs, sensitive variable assignments,
-and high-entropy strings. It prints severity, file paths, line numbers, and rule names;
-matched values and source lines are never included in console or JSON output.
-
-```sh
-# Scan this repository, or pass a path to another checkout.
-python3 git_secrets_scan.py
-python3 git_secrets_scan.py /path/to/repo
-
-# Scan the entire staged snapshot, including files unchanged by this commit.
-python3 git_secrets_scan.py --staged
-
-# Also inspect untracked files that are not excluded by .gitignore.
-python3 git_secrets_scan.py --include-untracked
-
-# Also scan history reachable from all local refs and HEAD.
-python3 git_secrets_scan.py --history
-
-# Save a redacted report (relative paths resolve against the repository root).
-python3 git_secrets_scan.py --json /tmp/secrets-report.json
-```
-
-Exit codes: **0** means no new findings (or a successful baseline write),
-**1** means new potential secrets, and **2** means an input or operational error.
-Every severity causes exit 1 when new: HIGH identifies strong credential patterns,
-MEDIUM covers generic assignments and other token formats, and LOW covers entropy
-heuristics. Severity is a triage hint, not proof that a credential is valid.
-
-### Combined design
-
-This version combines the original scanner with the supplied `secrets_scanner.py`:
-
-| Area | Selection |
-| --- | --- |
-| Detection | Keep existing rule IDs; add AWS secret keys, Slack webhooks, JWTs, and PGP private keys from the supplied version. |
-| Entropy noise | Use the supplied version's quoted/assigned context and UUID filtering; require a nearby keyword for hex candidates. Keep broad scanning available with `--entropy-mode all`. |
-| History | Adopt `--history`, implemented using complete Git blobs and NUL-delimited tree records to handle merge commits, multiline keys, and unusual filenames. |
-| Baselines | Keep full SHA-256 fingerprints, validation, and atomic writes; add stale-entry reporting and the `--update-baseline` alias. |
-| Output | Add severity and commit locations; keep full redaction rather than revealing secret prefixes. |
-| Scan coverage | Keep staged scanning, optional untracked files, symlink protection, and reported skips. No automatic vendor/lockfile or long-line exclusions. |
-| Suppression | Add explicit glob exclusions and opt-in inline allowlists; use exact placeholder matches instead of broad substring filtering. |
-
-The scanner requires a Git checkout; it does not silently fall back to directory
-walking when Git fails. All functionality uses the Python standard library.
-
-### Baseline workflow
-
-First review the findings. Remove actual secrets from source and rotate exposed
-credentials. Use a baseline only for findings you deliberately accept, such as
-test fixtures and false positives:
-
-```sh
-python3 git_secrets_scan.py --write-baseline
-git add .secrets-baseline.json
-
-# Future runs suppress findings recorded in that baseline.
-python3 git_secrets_scan.py
-```
-
-The default baseline is `.secrets-baseline.json` at the repository root.
-`--baseline PATH` selects a different file. `--write-baseline` (also spelled
-`--update-baseline`) explicitly replaces
-the baseline with all findings in the selected scan scope, removing stale entries;
-it reports new findings but exits 0. Normal scans never modify the baseline.
-Use consistent scope and thresholds when refreshing a baseline.
-Stale counts mean an entry was not found in the selected scope, not necessarily
-that the secret disappeared from all history. Use `--history --update-baseline`
-when reviewing and accepting historical findings as well. Duplicate findings
-share one entry; current files take precedence over historical occurrences.
-This repository's included baseline accepts only synthetic test values in
-`test_git_secrets_scan.py`.
-
-Each entry contains a SHA-256 fingerprint of the file path, rule ID, and matched
-value, plus location metadata. Moving a finding to another line in the same file
-keeps it baselined; changing the value or file path flags it again. Private key
-fingerprints cover the whole key block. Baselines contain no raw matched values,
-but hashes of weak secrets can be guessed: review baselines and their file paths
-before publishing them. A malformed baseline fails the scan instead of silently
-disabling checks. Protect baseline changes through normal code review.
-Existing baselines from earlier versions of `git_secrets_scan.py` remain readable.
-The supplied standalone script used a different, truncated fingerprint format;
-those baseline files must be regenerated and reviewed, not copied over directly.
-
-### Scope and tuning
-
-- `--entropy-threshold 4.5` sets the Shannon entropy cutoff in bits per character.
-  Candidates need at least 20 characters and both letters and digits. Hex strings
-  need at least 32 characters and use a cutoff capped at 3.5. The default
-  `--entropy-mode contextual` examines quoted/assigned candidates, skips UUIDs,
-  and requires a secret-related keyword before hex candidates on the same line.
-  `--entropy-mode all` checks all candidate tokens, including bare strings and
-  hashes. `--no-entropy` disables entropy checks; regex rules still run.
-  Hashes, lockfiles, and generated identifiers can still produce false positives.
-- `--exclude 'vendor/*'` explicitly skips matching repo-relative paths in both
-  current files and history. Repeat the option for more patterns. Globs match the
-  entire path, are case-sensitive, and `*` can cross directory separators. Quote
-  globs to prevent shell expansion. Exclusions appear in the skipped list.
-- `--honor-allowlist` enables comment markers such as `# pragma: allowlist secret`
-  and `// nosecret` on the finding's line. This uses a comment-pattern heuristic,
-  not a language parser; review suppressions. Markers are ignored by default.
-  Inline-allowlisted findings are counted in the report and omitted from baseline
-  writes. A marker on a private-key header accepts that whole key block. A new
-  comment does not suppress an unallowlisted occurrence in history.
-- `--max-bytes 1048576` sets the per-file size limit (default 1 MiB).
-- Binary files containing NUL bytes, oversized files, symlinks, submodules, and
-  tracked files deleted from the working tree are skipped and listed in the
-  console and JSON report. Skips alone do not produce a nonzero exit code;
-  review them when coverage matters. Submodules require separate scans.
-- Tracked files are scanned even when a `.gitignore` rule would match them.
-  Untracked and ignored files are excluded by default. Baseline and report files
-  are excluded from their own scan.
-- `--history` adds every unique file version reachable from local refs and HEAD,
-  including deleted files, other branches, and merge-only changes. It reports
-  a commit containing each finding and its real line number. It never fetches
-  remote commits; unreachable objects and reflog-only commits are outside scope.
-  Shallow clones produce a warning. Large histories can be expensive because
-  each commit tree is enumerated, although unchanged file versions are scanned
-  only once per path. Size limits and exclusions also apply to historical files.
-- Without `--history`, only current working-tree files or the Git index are scanned.
-  No mode can prove a repository is secret-free, validate credentials, or detect
-  every encoded or split secret. No network requests are made.
-
-Run the disposable-repository tests with:
-
-```sh
-python3 -m unittest -v test_git_secrets_scan.py
-```
-
-## Web security quick check
-
-`appsec_quickcheck.py` checks HTTPS redirects, security headers, cookie flags,
-and TLS certificate validity. Version 2 combines the original script's simple
-standard-library CLI with stricter parsing, bounded redirects, and explicit
-scan-completeness reporting. Only scan systems you own or are authorized to test.
-
-```sh
-python3 appsec_quickcheck.py https://example.com
-python3 appsec_quickcheck.py -f targets.txt --json report.json --fail-on MEDIUM
-python3 appsec_quickcheck.py https://example.com --allow-host www.example.com
-python3 appsec_quickcheck.py https://example.com:8443 --http-port 8080
-python3 appsec_quickcheck.py https://example.com --no-http-probe --max-redirects 3
-```
-
-### What the combined version keeps and improves
-
-| Area | Original behavior | Combined behavior |
+| Day | Tool | Guide |
 | --- | --- | --- |
-| CLI and dependencies | Python standard library, target files, JSON, severity threshold | Retained; target inputs are validated and deduplicated before any request. |
-| Cookies | Searches the entire Set-Cookie text for flag substrings | Parses individual attributes; checks SameSite, Partitioned, and prefix requirements without printing cookie values. |
-| Redirects | Follows arbitrary hosts; returns status 0 after the limit | Detects loops, invalid destinations, and exhausted limits; stops HTTPS downgrades and unapproved host changes. |
-| TLS | Opens a separate connection to the initial hostname | Inspects the verified TLS connection used for each response, including followed HTTPS redirects. |
-| Headers | Mostly presence and substring checks | Validates HSTS max-age, nosniff, X-Frame-Options, and Referrer-Policy; applies document-specific checks to HTML or missing Content-Type. |
-| CSP | Flags unsafe-inline wherever it appears | Inspects script directives and fallback rules, distinguishes report-only policies, and accounts for nonces/hashes. |
-| CORS | Calls wildcard origin plus credentials a HIGH finding | Reports a MEDIUM browser-rejected configuration; does not claim credential exposure from that alone. |
-| Failure handling | Broad exception suppression for the HTTP probe | Distinguishes refused HTTP connections from an inconclusive probe; network and redirect failures make the scan incomplete. |
-| Reports | Raw target URLs and direct JSON writes | Redacts query strings and raw header values; writes JSON atomically and reports completeness per target. |
-
-Side-by-side regression cases against the original script confirmed that the
-combined version catches a cookie value that merely contains `secure`, `httponly`,
-and `samesite`; upgrades `HSTS max-age=0` from LOW to HIGH; detects invalid
-X-Frame-Options; and avoids the old warning for a nonce-based CSP with
-`unsafe-inline`. The original file remains available in Git history.
-
-### Scope, requests, and exit codes
-
-- Each target uses unauthenticated GET requests; response bodies are not read,
-  cookies are not replayed, and pages are not crawled. There is no CORS reflection
-  probe, exploit verification, or authenticated application testing.
-- Redirects stay on the starting hostname unless an additional hostname is
-  supplied with repeatable `--allow-host`. Ports may change on allowed hosts.
-  The default limit is five redirects; `--max-redirects` accepts 0 through 50.
-  HTTPS-to-HTTP downgrades are reported and never followed.
-- For an initial HTTPS target, a separate HTTP request checks `/` on port 80.
-  It sends neither the original path nor query and checks only whether the first
-  response redirects directly to HTTPS. `--http-port` changes that port;
-  `--no-http-probe` disables this request. Connection refusal is recorded as an
-  observation; DNS failures, timeouts, and other probe errors are inconclusive.
-- Certificate and hostname validation remain enabled. TLS findings describe
-  the negotiated protocol, not every protocol the server supports. The scanner
-  does not retry with unverified certificates or attempt obsolete protocols.
-- Cookie, HSTS, and information-leak checks include intermediate responses.
-  Document-specific CSP, framing, Referrer-Policy, and Permissions-Policy checks
-  apply to terminal HTML responses or responses with no Content-Type. Unknown
-  HTML context is treated conservatively. Error pages are explicitly identified.
-- Header checks are baseline heuristics. Multiple CSP policies can impose
-  stricter combined restrictions than an individual-policy warning suggests.
-  Permissions-Policy presence is checked, not application-specific correctness.
-  Cookie flag recommendations depend on the cookie's purpose. A clean result
-  is not a full application security assessment.
-- `--timeout` defaults to 8 seconds **per socket operation**, not for the entire
-  run. Redirects, DNS resolution, and multiple targets can take longer.
-- Exit **0** means all requested checks completed below `--fail-on` (default
-  HIGH); **1** means completed checks found an issue at or above that threshold;
-  **2** means invalid input, report failure, or an incomplete scan. Exit 2 takes
-  precedence over findings, including a failed TLS certificate verification.
-  An HTTP error status alone does not make header inspection incomplete.
-
-### JSON compatibility and output privacy
-
-Version 2 retains `--json` but changes the JSON format: `schema_version` is 2
-and `results` is a **list**, replacing the original object keyed by raw URLs.
-Each result contains `target`, `complete`, `responses_checked`, and `findings`.
-Each finding has `severity`, `check`, and `detail`, with a redacted `url` or probe
-`scope` where applicable. Update consumers of the original JSON format.
-
-Queries are replaced with `[REDACTED]` and fragments are removed from reports.
-Cookie values and raw response headers are not logged. **Hosts and URL paths
-remain visible**; avoid embedding secrets in path segments. URLs containing
-userinfo are rejected. Query values are still sent to the requested target and
-any followed redirect as required by HTTP URL resolution.
-
-Run the offline tests (local HTTP server and mocked TLS, no public targets):
+| 1 | [Web security check](scripts/web/appsec_quickcheck.py) | [Usage](docs/web-security.md) |
+| 2 | [Git secrets scanner](scripts/repository/git_secrets_scan.py) | [Usage](docs/secrets.md) |
+| 3 | [Dependency vulnerability check](scripts/repository/dependency_quickcheck.py) | [Usage](docs/dependencies.md) |
+| 4 | [Subdomain takeover check](scripts/network/subdomain_quickcheck.py) | [Usage](docs/subdomains.md) |
+| 5 | [Exposed sensitive files check](scripts/web/sensitive_files_quickcheck.py) | [Usage](docs/sensitive-files.md) |
+| 6 | [Certificate expiry monitor](scripts/network/cert_expiry_quickcheck.py) | [Usage](docs/certificate-expiry.md) |
+| — | [Weekly runner, Days 1–6](scripts/weekly_runner.py) | [Usage](docs/weekly-runner.md) |
+| — | [Semgrep wrapper](scripts/repository/semgrep_quickcheck.py) | [Usage](docs/semgrep.md) |
 
 ```sh
-python3 -m unittest -v test_appsec_quickcheck.py
-python3 -m unittest discover -v
+python3 scripts/repository/git_secrets_scan.py /path/to/project
+python3 scripts/repository/dependency_quickcheck.py /path/to/project
+python3 scripts/web/appsec_quickcheck.py https://example.com
+python3 scripts/network/cert_expiry_quickcheck.py example.com
 ```
 
-Behavior references: [MDN cookie attributes and prefixes](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie),
-[MDN credentialed CORS with wildcard origins](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS/Errors/CORSNotSupportingCredentials),
-[MDN CSP script sources](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/script-src),
-and [Python TLS documentation](https://docs.python.org/3/library/ssl.html).
+Only scan systems you own or are authorized to assess. See each guide for scope,
+exit codes and incomplete-result behavior.
+
+The linked guides retain each utility's options, network behavior, baseline semantics and limits.
+
+## Weekly report
+
+```sh
+cp examples/weekly_runner.example.json weekly_runner.json
+# Edit weekly_runner.json with your repo path and authorized target files.
+python3 scripts/weekly_runner.py weekly_runner.json
+# Or supply quick inputs:
+python3 scripts/weekly_runner.py --repo /path/to/project --targets targets.txt
+```
+
+Local configuration and generated `reports/` are ignored by Git. Keep the
+configuration beside your input files: relative arguments resolve from the
+configuration's directory. See the [runner guide](docs/weekly-runner.md) for
+scheduling and options.
+
+## Tests
+
+Run the offline suite from the repository root:
+
+```sh
+python3 -m unittest discover -s tests -v
+# Run a single tool's tests:
+python3 -m unittest -v tests.test_weekly_runner
+```
+
+Tests use temporary files and mocked services; they do not scan live targets or
+send alerts. Add future scripts to the relevant `scripts/` folder, their tests
+to `tests/`, and usage notes to `docs/`.
+
+Existing cron jobs or commands using root-level script paths must be updated to
+the paths above. Accepted secrets fixtures remain in `.secrets-baseline.json` at
+the repository root.

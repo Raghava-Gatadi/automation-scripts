@@ -20,12 +20,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 TITLE = "# Weekly security quick check"
 MAX_REPORT_LINES = 300
 CHECKS = (
-    ("appsec", "Web security", "appsec_quickcheck.py"),
-    ("secrets", "Git secrets", "git_secrets_scan.py"),
-    ("dependencies", "Dependency vulnerabilities", "dependency_quickcheck.py"),
-    ("subdomains", "Dangling CNAMEs", "subdomain_quickcheck.py"),
-    ("sensitive_files", "Exposed files", "sensitive_files_quickcheck.py"),
-    ("certificates", "Certificate expiry", "cert_expiry_quickcheck.py"),
+    ("appsec", "Web security", "web/appsec_quickcheck.py"),
+    ("secrets", "Git secrets", "repository/git_secrets_scan.py"),
+    ("dependencies", "Dependency vulnerabilities", "repository/dependency_quickcheck.py"),
+    ("subdomains", "Dangling CNAMEs", "network/subdomain_quickcheck.py"),
+    ("sensitive_files", "Exposed files", "web/sensitive_files_quickcheck.py"),
+    ("certificates", "Certificate expiry", "network/cert_expiry_quickcheck.py"),
 )
 
 
@@ -79,8 +79,12 @@ def quick_checks(repo, targets, scratch, notes=None):
             checks["dependencies"] = [str(project)]
     if targets:
         # Reuse the root-origin and DNS-host validators of the bundled scripts.
-        from sensitive_files_quickcheck import origin
-        from subdomain_quickcheck import hostname
+        if __package__:
+            from .web.sensitive_files_quickcheck import origin
+            from .network.subdomain_quickcheck import hostname
+        else:
+            from web.sensitive_files_quickcheck import origin
+            from network.subdomain_quickcheck import hostname
         values = Path(targets).read_text(encoding="utf-8-sig").splitlines()
         assets = list(dict.fromkeys(origin(line.split("#", 1)[0].strip()) for line in values
                                    if line.split("#", 1)[0].strip()))

@@ -9,7 +9,7 @@ import unittest
 import urllib.error
 from unittest.mock import MagicMock, patch
 
-import subdomain_quickcheck as scanner
+from scripts.network import subdomain_quickcheck as scanner
 
 HOST, TARGET = "app.example.com", "removed.github.io"
 
