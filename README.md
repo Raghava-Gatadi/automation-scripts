@@ -1,8 +1,23 @@
-# Automation scripts
+# Security Automation Scripts
 
 Small Python utilities using only the standard library. Requires Python 3.9+;
 the secrets scanner requires Git, and the Semgrep wrapper requires Semgrep CLI
 (plus Git for baseline comparison) on your PATH.
+
+## Utility index
+
+| Utility | Purpose |
+| --- | --- |
+| [semgrep_quickcheck.py](semgrep_quickcheck.py) | Semgrep wrapper and reviewed baselines |
+| [appsec_quickcheck.py](appsec_quickcheck.py) | Application-security checks |
+| [dependency_quickcheck.py](dependency_quickcheck.py) | Dependency review |
+| [git_secrets_scan.py](git_secrets_scan.py) | Git secret scanning |
+| [sensitive_files_quickcheck.py](sensitive_files_quickcheck.py) | Sensitive-file checks |
+| [cert_expiry_quickcheck.py](cert_expiry_quickcheck.py) | TLS certificate expiry |
+| [subdomain_quickcheck.py](subdomain_quickcheck.py) | Subdomain checks |
+| [weekly_runner.py](weekly_runner.py) | Scheduled checks and report orchestration |
+
+The sections below retain each utility's exact options, network behavior, baseline semantics, and limits.
 
 ## Semgrep quick check
 
