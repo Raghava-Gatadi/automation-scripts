@@ -6,27 +6,51 @@ the secrets scanner requires Git, and the Semgrep wrapper requires Semgrep CLI
 
 ## Semgrep quick check
 
-`semgrep_quickcheck.py` runs Semgrep and summarizes finding counts by severity,
-rule and affected file. It uses Semgrep's native Git baseline comparison rather
-than inventing fingerprints or maintaining an accepted-findings file.
+`semgrep_quickcheck.py` runs Semgrep and summarizes new findings by severity,
+rule and affected file. It combines accepted-findings files from the supplied
+`semgrep_wrap.py` with the original wrapper's native Git comparison and error handling.
 
 ```sh
 # Install Semgrep CLI separately using its official installation instructions.
+python3 semgrep_quickcheck.py /path/to/repo
+python3 semgrep_quickcheck.py /path/to/repo --update-baseline
+python3 semgrep_quickcheck.py /path/to/repo --fail-on ERROR
 python3 semgrep_quickcheck.py /path/to/repo --config p/default
 python3 semgrep_quickcheck.py /path/to/repo --config p/default --baseline HEAD~1
 python3 semgrep_quickcheck.py /path/to/repo --config .semgrep.yml --baseline origin/main --json reports/semgrep-summary.json
 ```
 
-- `--config` is required and repeatable. Local rule paths are relative to the
+- `--config` is repeatable and defaults to `p/default`. Local rule paths are relative to the
   scanned directory; registry configs require network access. Trust the rules
   you select. This uses `semgrep scan` with the OSS engine, metrics off, version
   checks disabled, strict errors and finding exit codes. No autofix is requested.
-- Without `--baseline`, reports all findings returned by the selected scan.
-  With it, resolves the local Git ref to a commit and delegates comparison to
+- By default, compares against `<repo>/.semgrep-baseline.json`. A missing file
+  means all findings are new. `--baseline-file PATH` chooses another file relative
+  to the repo. `--update-baseline` explicitly accepts all current findings after
+  a complete scan, writes atomically and exits 0. It never overwrites the baseline
+  after scan errors, skipped rules, missing source, or timeout.
+- File fingerprints cover rule ID, repo-relative file, severity and exact matched
+  source lines, excluding line numbers. Line moves remain baselined; edits inside
+  strings, formatting or severity changes resurface. An occurrence counter detects
+  added identical matches. Source files must stay available and stable during
+  the scan; unreadable/outside-repo source fails instead of hashing empty content.
+  Baselines contain locations and hashes, not source, but hashes of guessable
+  content can be guessed. Review baseline changes before committing them.
+- Absent baseline entries are called **stale**, not fixed: rules, exclusions or
+  scope changes can also explain their absence. Use consistent scope/rules when
+  refreshing. The supplied standalone script used a different truncated hash
+  format; regenerate into a new baseline path and review it rather than copying
+  that baseline directly.
+- `--baseline COMMIT_OR_REF` instead selects native Git diff mode. It is mutually
+  exclusive with file-baseline selection/update. It resolves the local ref and delegates comparison to
   `--baseline-commit`: only findings absent from that baseline are returned.
   A missing/invalid baseline fails; it never falls back to a full scan.
   Fetch needed refs yourself and use a clean working tree as required by Semgrep.
-  This is not an inventory of old, resolved or unchanged findings.
+  This mode is not an inventory of old, resolved or unchanged findings.
+- `--fail-on INFO` (default) fails for any new finding. Choose WARNING or ERROR
+  to change the gate; below-threshold findings remain visible. The threshold and
+  blocking count are printed. Unlike the supplied version, messages that may
+  interpolate source values are excluded from console and JSON.
 - Prints the top five rules and first twenty finding locations. Optional JSON
   saves all returned locations and summary counts. Source snippets, interpolated
   messages, metavariables, fixes, traces and raw stderr are not printed or saved.
@@ -38,12 +62,19 @@ python3 semgrep_quickcheck.py /path/to/repo --config .semgrep.yml --baseline ori
   still apply. Skipped rules or JSON-reported scan errors produce an incomplete
   result. A zero-finding diff (or zero scanned files) is not a full security audit.
   `--timeout` caps the Semgrep process at 300 seconds by default.
-- Exit **0**: completed with no findings; **1**: completed with findings; **2**:
+- Exit **0**: completed with no new findings at/above the threshold, or a successful
+  baseline update; **1**: new findings meet the threshold; **2**:
   missing tools, invalid config/baseline, timeout, partial/error results or output
   failure. This standalone wrapper is not added to the six-step weekly runner.
 
 References: [Semgrep CLI and baseline options](https://docs.semgrep.dev/cli-reference),
 [Semgrep JSON fields](https://docs.semgrep.dev/semgrep-appsec-platform/json-and-sarif).
+
+Offline tests use Semgrep JSON fixtures and send no network traffic:
+
+```sh
+python3 -m unittest -v test_semgrep_quickcheck.py
+```
 
 ## Weekly runner (Days 1–6)
 
@@ -55,6 +86,10 @@ Findings, failures and timeouts do not prevent later steps from running.
 cp weekly_runner.example.json weekly_runner.json
 # Edit weekly_runner.json with your repo path and your authorized target files.
 python3 weekly_runner.py weekly_runner.json
+# Or use quick inputs without a JSON config:
+python3 weekly_runner.py --repo /path/to/project --targets targets.txt
+python3 weekly_runner.py --repo /path/to/project
+python3 weekly_runner.py --targets targets.txt
 ```
 
 The example reuses `assets.txt` (HTTP(S) origins) for Days 1 and 5,
@@ -64,17 +99,33 @@ Keep all six check keys. Each value is the normal script's CLI arguments as a
 JSON list; no shell expansion is performed. Arguments and target-file paths are
 relative to the config's directory. Scripts are located beside the runner.
 
+Quick inputs are taken from the supplied runner, adapted to this repository's
+actual script names. `--targets` accepts DNS names or HTTP(S) origins, not URL
+paths/queries. It creates temporary per-tool files: web tools receive origins,
+the CNAME tool receives full DNS names (IP/short-name omissions are noted), and
+the certificate tool receives host/port targets. HTTP origins map to TLS port
+443; explicit HTTPS ports are preserved. Missing input groups and absent root
+dependency manifests appear as **SKIPPED**, not PASS. `--repo` scans the working
+tree; use JSON config to opt into history or additional tool flags. Config-file
+and quick-input modes cannot be combined.
+
 - Default output: `reports/weekly-report.md`, relative to the config directory.
+  Quick mode defaults to `reports/weekly-report-YYYY-MM-DD.md` (UTC date) relative
+  to the current directory. `--out` aliases `--report`; `--timeout` aliases
+  `--step-timeout`.
   `--report PATH` selects another destination. Repeated runs replace that report
   atomically; unrelated existing files are protected. The local config and
   `reports/` directory are ignored by Git. Reports can contain internal asset and
   repository names; store them appropriately.
 - Each script has a five-minute limit; change it with `--step-timeout SECONDS`.
-  The report records partial output from timed-out checks. A missing script is an
+  The report records partial output from timed-out checks. Each section is capped
+  at 300 lines with an explicit omission count; run that tool directly for full
+  output. A missing script is an
   error, not a skipped success. Exit **0** means all six returned 0; **1** means
   findings; **2** means at least one incomplete/error/timeout or report failure.
   Exit 2 takes precedence; review the report even when a step passes, because
   individual tools can have below-threshold findings and documented skipped scope.
+  In quick mode, exit 0 means selected checks passed; SKIPPED checks were not run.
 - The sample enables no alerts, history scan, HTTP takeover probes, baseline writes,
   or insecure TLS. You can explicitly add normal script options to the config;
   treat it as trusted executable configuration. For certificate alerts, add

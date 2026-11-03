@@ -111,6 +111,43 @@ class RunnerTests(unittest.TestCase):
         example = Path(runner.__file__).with_name("weekly_runner.example.json")
         self.assertEqual(set(runner.load_config(example)), set(self.checks))
 
+    def test_quick_inputs_normalize_targets_for_each_tool(self):
+        project, scratch = self.root / "project", self.root / "scratch"
+        project.mkdir()
+        scratch.mkdir()
+        (project / "requirements.txt").write_text("fixture==1.0")
+        targets = self.root / "targets.txt"
+        targets.write_text(" # comment\napp.example.invalid\nhttp://site.example.invalid:8080\nhttps://api.example.invalid:8443\nhttps://[::1]:8443\n")
+        checks = runner.quick_checks(str(project), str(targets), scratch)
+        self.assertEqual(checks["secrets"], [str(project.resolve())])
+        self.assertEqual(checks["dependencies"], [str(project.resolve())])
+        self.assertEqual(len((scratch / "assets.txt").read_text().splitlines()), 4)
+        self.assertEqual((scratch / "subdomains.txt").read_text().splitlines(), ["app.example.invalid", "site.example.invalid", "api.example.invalid"])
+        self.assertEqual((scratch / "hosts.txt").read_text().splitlines(),
+                         ["app.example.invalid", "site.example.invalid:443", "api.example.invalid:8443", "[::1]:8443"])
+
+    def test_repo_only_skips_web_and_absent_dependency_inputs(self):
+        checks = runner.quick_checks(str(self.root), None, self.root)
+        self.assertIsNone(checks["dependencies"])
+        with patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "done")) as run, \
+                contextlib.redirect_stdout(io.StringIO()):
+            results = runner.run_checks(checks, self.root, 1)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(sum(item["status"] == "SKIPPED" for item in results), 5)
+
+    def test_quick_mode_report_exit_and_timeout_alias(self):
+        output = self.root / "quick.md"
+        with patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "done")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(runner.main(["--repo", str(self.root), "--out", str(output), "--timeout", "1"]), 0)
+        self.assertIn("SKIPPED", output.read_text())
+        self.assertIn("not assessed", output.read_text())
+
+    def test_report_truncation_is_explicit(self):
+        result = {"day": 1, "name": "Fixture", "status": "PASS", "exit_code": 0, "seconds": 0,
+                  "output": "\n".join("line" for _ in range(305))}
+        self.assertIn("5 lines omitted", runner.report_text([result], "fixture"))
+
 
 if __name__ == "__main__":
     unittest.main()
